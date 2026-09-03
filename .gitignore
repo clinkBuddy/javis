@@ -1,0 +1,22 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.syso
+
+# go
+/vendor/
+
+# web
+/web/node_modules/
+/web/.vite/
+
+# local runtime data (never commit)
+/.jarvis-home/
+*.db
+*.db-wal
+*.db-shm
+
+# editor / os
+.DS_Store
+Thumbs.db

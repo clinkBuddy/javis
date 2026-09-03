@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JARVIS</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font: 14px/1.6 "Segoe UI", system-ui, sans-serif;
+        background: #0d1117;
+        color: #e6edf3;
+      }
+      main { width: min(560px, 90vw); }
+      h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: 0.5px; }
+      .sub { margin: 0 0 24px; color: #8b949e; }
+      .card {
+        border: 1px solid #30363d;
+        border-radius: 10px;
+        padding: 18px 20px;
+        background: #161b22;
+      }
+      dl { display: grid; grid-template-columns: 120px 1fr; gap: 8px 16px; margin: 0; }
+      dt { color: #8b949e; }
+      dd { margin: 0; font-family: "Cascadia Mono", Consolas, monospace; }
+      .ok { color: #3fb950; }
+      .bad { color: #f85149; }
+      .note { margin-top: 20px; color: #8b949e; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>JARVIS</h1>
+      <p class="sub">Spring Boot jar 통합 관리 솔루션</p>
+      <div class="card">
+        <dl>
+          <dt>코어 상태</dt><dd id="status">확인 중…</dd>
+          <dt>버전</dt><dd id="version">-</dd>
+          <dt>데이터 경로</dt><dd id="root">-</dd>
+          <dt>가동 시간</dt><dd id="uptime">-</dd>
+        </dl>
+      </div>
+      <p class="note">관리 UI는 P2 단계에서 이 자리에 올라갑니다.</p>
+    </main>
+    <script>
+      const set = (id, text, cls) => {
+        const el = document.getElementById(id);
+        el.textContent = text;
+        if (cls) el.className = cls;
+      };
+
+      async function refresh() {
+        try {
+          const res = await fetch("/api/v1/health", { cache: "no-store" });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const body = await res.json();
+          set("status", body.status, body.status === "ok" ? "ok" : "bad");
+          set("version", body.version);
+          set("root", body.dataRoot);
+          set("uptime", body.uptime);
+        } catch (err) {
+          set("status", "연결 실패: " + err.message, "bad");
+        }
+      }
+
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>
