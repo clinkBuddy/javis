@@ -17,6 +17,12 @@
 *.db-wal
 *.db-shm
 
+# Application jars are managed artifacts, not source. They are often large and
+# frequently carry bundled credentials in application*.yml, so they must never
+# land in git history.
+*.jar
+!/web/**/gradle-wrapper.jar
+
 # editor / os
 .DS_Store
 Thumbs.db

@@ -25,6 +25,7 @@ import (
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/core"
+	"github.com/sjkim/jarvis/internal/winproc"
 	"github.com/sjkim/jarvis/internal/winsvc"
 )
 
@@ -64,6 +65,8 @@ func dispatch(args []string) error {
 		return cmdStatus(rest)
 	case "tray":
 		return cmdTray(rest)
+	case "proc":
+		return cmdProc(rest)
 	case "stopper":
 		return cmdStopper(rest)
 	case "version", "--version", "-v":
@@ -92,6 +95,7 @@ Commands:
   stop               Stop the installed service.
   status             Show service state and configured data root.
   tray               Run the notification area icon for the current user.
+  proc               Low-level process control: launch, list, info, stop.
   version            Print build information.
 
 Common flags:
@@ -285,16 +289,20 @@ func cmdTray(args []string) error {
 		"use --register or --unregister to manage the logon entry")
 }
 
+// cmdStopper is an internal helper, not something an operator invokes. It
+// exists as a separate process because a console CTRL+C reaches everything
+// attached to the target's console, so whoever raises it must be expendable.
+// See winproc.SendCtrlC.
 func cmdStopper(args []string) error {
 	fs := newFlagSet("stopper")
-	pid := fs.Int("pid", 0, "process id to signal")
+	pid := fs.Uint("pid", 0, "process id to signal")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *pid <= 0 {
+	if *pid == 0 {
 		return errors.New("--pid is required")
 	}
-	return errors.New("the stopper helper is not implemented yet (planned for P1)")
+	return winproc.SendCtrlC(uint32(*pid))
 }
 
 func printAdminURL(home string) {
