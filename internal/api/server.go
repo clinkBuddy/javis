@@ -15,15 +15,17 @@ import (
 
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/store"
+	"github.com/sjkim/jarvis/internal/supervisor"
 	"github.com/sjkim/jarvis/internal/webui"
 )
 
 type Deps struct {
-	Log     *slog.Logger
-	Cfg     *config.Config
-	Paths   config.Paths
-	DB      *store.DB
-	Started time.Time
+	Log        *slog.Logger
+	Cfg        *config.Config
+	Paths      config.Paths
+	DB         *store.DB
+	Supervisor *supervisor.Supervisor
+	Started    time.Time
 }
 
 type Server struct {
@@ -54,6 +56,7 @@ func (s *Server) routes() http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
 		r.Get("/version", s.handleVersion)
+		s.registerAppRoutes(r)
 	})
 
 	r.Handle("/*", webui.Handler())

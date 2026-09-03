@@ -15,7 +15,9 @@ import (
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/logging"
+	"github.com/sjkim/jarvis/internal/runner"
 	"github.com/sjkim/jarvis/internal/store"
+	"github.com/sjkim/jarvis/internal/supervisor"
 )
 
 // shutdownGrace bounds how long we wait for in-flight HTTP requests. It has no
@@ -24,11 +26,12 @@ import (
 const shutdownGrace = 10 * time.Second
 
 type Core struct {
-	Cfg   *config.Config
-	Paths config.Paths
-	Log   *slog.Logger
-	DB    *store.DB
-	API   *api.Server
+	Cfg        *config.Config
+	Paths      config.Paths
+	Log        *slog.Logger
+	DB         *store.DB
+	Supervisor *supervisor.Supervisor
+	API        *api.Server
 
 	started time.Time
 	closers []io.Closer
@@ -70,18 +73,29 @@ func Bootstrap(ctx context.Context, root string, console bool) (*Core, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
+	localRunner := runner.NewLocalRunner(log.With("component", "runner"))
+	sup := supervisor.New(db, paths, localRunner, log.With("component", "supervisor"))
+	c.Supervisor = sup
+
 	c.API = api.New(api.Deps{
-		Log:     log.With("component", "api"),
-		Cfg:     cfg,
-		Paths:   paths,
-		DB:      db,
-		Started: c.started,
+		Log:        log.With("component", "api"),
+		Cfg:        cfg,
+		Paths:      paths,
+		DB:         db,
+		Supervisor: sup,
+		Started:    c.started,
 	})
 	return c, nil
 }
 
 // Start begins serving. It returns as soon as the listener is bound.
 func (c *Core) Start(ctx context.Context) error {
+	// Reconcile managed processes with reality before accepting API calls.
+	if err := c.Supervisor.Reconcile(ctx); err != nil {
+		c.Log.Error("reconciliation had errors", "err", err)
+		// Non-fatal: better to start degraded than not at all.
+	}
+
 	if err := c.API.Start(ctx); err != nil {
 		return err
 	}
@@ -112,6 +126,11 @@ func (c *Core) Shutdown() error {
 	defer cancel()
 
 	var errs []error
+	// Cancel all watchers. Managed java processes are intentionally NOT stopped.
+	if c.Supervisor != nil {
+		c.Supervisor.Shutdown()
+	}
+
 	if c.API != nil {
 		if err := c.API.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("stop admin interface: %w", err))
