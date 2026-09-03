@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -29,9 +30,9 @@ func EnableTrayAutostart(root string) error {
 		return fmt.Errorf("locate own executable: %w", err)
 	}
 
-	cmd := fmt.Sprintf("%q tray", exe)
+	cmd := quoteArg(exe) + " tray"
 	if root != "" {
-		cmd += fmt.Sprintf(" --home %q", root)
+		cmd += " --home " + quoteArg(root)
 	}
 
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE)
@@ -44,6 +45,40 @@ func EnableTrayAutostart(root string) error {
 		return fmt.Errorf("write Run value: %w", err)
 	}
 	return nil
+}
+
+// quoteArg wraps a value in double quotes for a Windows command line.
+//
+// fmt's %q must not be used here: it applies Go escaping, which turns
+// C:\dev\jarvis into "C:\\dev\\jarvis". Windows quoting only treats the double
+// quote as special, and a run of backslashes immediately before the closing
+// quote has to be doubled so it is not read as escaping that quote.
+func quoteArg(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+
+	backslashes := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '\\':
+			backslashes++
+			b.WriteByte(c)
+		case '"':
+			// N backslashes then a quote must become 2N+1 backslashes then the
+			// quote; N are already written, so add N+1 more.
+			b.WriteString(strings.Repeat(`\`, backslashes+1))
+			b.WriteByte('"')
+			backslashes = 0
+		default:
+			backslashes = 0
+			b.WriteByte(c)
+		}
+	}
+
+	// Trailing backslashes would otherwise escape the closing quote.
+	b.WriteString(strings.Repeat(`\`, backslashes))
+	b.WriteByte('"')
+	return b.String()
 }
 
 func DisableTrayAutostart() error {

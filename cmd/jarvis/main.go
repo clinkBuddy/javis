@@ -253,11 +253,36 @@ func cmdStatus(args []string) error {
 
 func cmdTray(args []string) error {
 	fs := newFlagSet("tray")
-	_ = homeFlag(fs)
+	home := homeFlag(fs)
+	register := fs.Bool("register", false, "register the tray to start at logon and exit")
+	unregister := fs.Bool("unregister", false, "remove the logon entry and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return errors.New("the tray icon is not implemented yet (planned for P7)")
+
+	// Autostart lives in HKCU, so these need no elevation. They are separate
+	// from `install` because the service is machine-wide while the tray icon
+	// is per-user: a second administrator logging in needs their own entry.
+	switch {
+	case *register && *unregister:
+		return errors.New("--register and --unregister are mutually exclusive")
+	case *register:
+		if err := winsvc.EnableTrayAutostart(*home); err != nil {
+			return err
+		}
+		cmd, _ := winsvc.TrayAutostartCommand()
+		fmt.Printf("tray registered at logon: %s\n", cmd)
+		return nil
+	case *unregister:
+		if err := winsvc.DisableTrayAutostart(); err != nil {
+			return err
+		}
+		fmt.Println("tray logon entry removed")
+		return nil
+	}
+
+	return errors.New("the tray icon is not implemented yet (planned for P7); " +
+		"use --register or --unregister to manage the logon entry")
 }
 
 func cmdStopper(args []string) error {
