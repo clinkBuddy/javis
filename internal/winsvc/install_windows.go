@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -135,17 +136,34 @@ func StopService() error {
 }
 
 // Status returns the current service state, or ErrNotInstalled.
+//
+// It opens the service manager with SC_MANAGER_CONNECT rather than full
+// access, so `jarvis status` works from an ordinary command prompt. Only the
+// commands that actually change something require elevation.
 func Status() (svc.State, error) {
-	var state svc.State
-	err := withService(func(s *mgr.Service) error {
-		st, err := s.Query()
-		if err != nil {
-			return err
-		}
-		state = st.State
-		return nil
-	})
-	return state, err
+	h, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return 0, fmt.Errorf("connect to service manager: %w", err)
+	}
+	m := &mgr.Mgr{Handle: h}
+	defer m.Disconnect()
+
+	name, err := windows.UTF16PtrFromString(ServiceName)
+	if err != nil {
+		return 0, err
+	}
+	sh, err := windows.OpenService(m.Handle, name, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return 0, ErrNotInstalled
+	}
+	s := &mgr.Service{Name: ServiceName, Handle: sh}
+	defer s.Close()
+
+	st, err := s.Query()
+	if err != nil {
+		return 0, fmt.Errorf("query service: %w", err)
+	}
+	return st.State, nil
 }
 
 // StateString renders a service state for CLI output.
@@ -170,10 +188,12 @@ func StateString(s svc.State) string {
 	}
 }
 
+// withService opens the service for control operations, which require
+// elevation. Read-only callers should use Status instead.
 func withService(fn func(*mgr.Service) error) error {
 	m, err := mgr.Connect()
 	if err != nil {
-		return fmt.Errorf("connect to service manager: %w", err)
+		return fmt.Errorf("connect to service manager (run as administrator): %w", err)
 	}
 	defer m.Disconnect()
 
