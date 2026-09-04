@@ -12,10 +12,12 @@
 /web/.vite/
 
 # local runtime data (never commit)
-/.jarvis-home/
+/.jarvis-home*/
 *.db
 *.db-wal
 *.db-shm
+/p2-run.*
+/ui-*.png
 
 # Application jars are managed artifacts, not source. They are often large and
 # frequently carry bundled credentials in application*.yml, so they must never

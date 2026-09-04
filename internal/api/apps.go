@@ -4,10 +4,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/sjkim/jarvis/internal/artifact"
 )
 
 type appCreateRequest struct {
@@ -28,6 +31,40 @@ type appResponse struct {
 	Watchdog    bool   `json:"watchdog"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
+
+	// Live view, joined in so the dashboard needs one request rather than one
+	// per app.
+	State          string `json:"state"`
+	PID            uint32 `json:"pid,omitempty"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	RunningVersion string `json:"runningVersion,omitempty"`
+	ActiveVersion  string `json:"activeVersion,omitempty"`
+	ArtifactCount  int    `json:"artifactCount"`
+}
+
+// appSelect joins the single instance row and the promoted artifact onto each
+// app. state falls back to STOPPED because an app that has never been started
+// has no instance row at all.
+const appSelect = `
+	SELECT a.id, a.name, COALESCE(a.display_name,''), COALESCE(a.description,''),
+		   a.target_kind, COALESCE(a.shutdown_url,''), a.autostart, a.watchdog,
+		   a.created_at, a.updated_at,
+		   COALESCE(i.state, 'STOPPED'), COALESCE(i.pid, 0), COALESCE(i.started_at, ''),
+		   COALESCE(run.version, ''), COALESCE(act.version, ''),
+		   (SELECT COUNT(*) FROM artifacts WHERE app_id = a.id)
+	FROM apps a
+	LEFT JOIN instances i ON i.app_id = a.id
+	LEFT JOIN artifacts run ON run.id = i.artifact_id
+	LEFT JOIN artifacts act ON act.id = a.active_artifact_id`
+
+func scanApp(sc rowScanner) (appResponse, error) {
+	var a appResponse
+	err := sc.Scan(&a.ID, &a.Name, &a.DisplayName, &a.Description,
+		&a.TargetKind, &a.ShutdownURL, &a.Autostart, &a.Watchdog,
+		&a.CreatedAt, &a.UpdatedAt,
+		&a.State, &a.PID, &a.StartedAt,
+		&a.RunningVersion, &a.ActiveVersion, &a.ArtifactCount)
+	return a, err
 }
 
 func (s *Server) registerAppRoutes(r chi.Router) {
@@ -42,32 +79,48 @@ func (s *Server) registerAppRoutes(r chi.Router) {
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.deps.DB.QueryContext(r.Context(), `
-		SELECT id, name, COALESCE(display_name,''), COALESCE(description,''),
-			   target_kind, COALESCE(shutdown_url,''), autostart, watchdog,
-			   created_at, updated_at
-		FROM apps ORDER BY name`)
+	rows, err := s.deps.DB.QueryContext(r.Context(), appSelect+` ORDER BY a.name`)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer rows.Close()
 
-	var apps []appResponse
+	apps := []appResponse{}
 	for rows.Next() {
-		var a appResponse
-		if err := rows.Scan(&a.ID, &a.Name, &a.DisplayName, &a.Description,
-			&a.TargetKind, &a.ShutdownURL, &a.Autostart, &a.Watchdog,
-			&a.CreatedAt, &a.UpdatedAt); err != nil {
+		a, err := scanApp(rows)
+		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		apps = append(apps, a)
 	}
-	if apps == nil {
-		apps = []appResponse{}
+	if err := rows.Err(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
 	}
+
+	// The stored state is only as fresh as the last event that touched it. A
+	// process killed from Task Manager leaves the row saying RUNNING, so the
+	// claim is confirmed against the OS before it reaches the dashboard.
+	s.refreshStates(r, apps)
 	writeJSON(w, http.StatusOK, apps)
+}
+
+func (s *Server) refreshStates(r *http.Request, apps []appResponse) {
+	if s.deps.Supervisor == nil {
+		return
+	}
+	for i := range apps {
+		if apps[i].State != "RUNNING" && apps[i].State != "STARTING" {
+			continue
+		}
+		h, err := s.deps.Supervisor.GetStatus(r.Context(), apps[i].Name)
+		if err != nil {
+			continue
+		}
+		apps[i].State = string(h.State)
+	}
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -77,8 +130,11 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("name is required"))
+	// The name becomes a directory under repo/ and apps/ and a path segment in
+	// every REST call for this app, so it has to be checked here rather than
+	// at first use.
+	if err := artifact.ValidateName("app name", req.Name); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -108,15 +164,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	var a appResponse
-	err := s.deps.DB.QueryRowContext(r.Context(), `
-		SELECT id, name, COALESCE(display_name,''), COALESCE(description,''),
-			   target_kind, COALESCE(shutdown_url,''), autostart, watchdog,
-			   created_at, updated_at
-		FROM apps WHERE name = ?`, name).
-		Scan(&a.ID, &a.Name, &a.DisplayName, &a.Description,
-			&a.TargetKind, &a.ShutdownURL, &a.Autostart, &a.Watchdog,
-			&a.CreatedAt, &a.UpdatedAt)
+	a, err := scanApp(s.deps.DB.QueryRowContext(r.Context(), appSelect+` WHERE a.name = ?`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, http.StatusNotFound, errors.New("app not found"))
 		return
@@ -125,22 +173,38 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, a)
+	one := []appResponse{a}
+	s.refreshStates(r, one)
+	writeJSON(w, http.StatusOK, one[0])
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	res, err := s.deps.DB.ExecContext(r.Context(), `DELETE FROM apps WHERE name = ?`, name)
+
+	appID, err := s.appIDByName(r, name)
 	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	// Deleting the record of a live process would orphan it: JARVIS would no
+	// longer know the PID or the markers, and stopping it would become a
+	// manual Task Manager job.
+	if s.isAppRunning(r, appID) {
+		writeErr(w, http.StatusConflict, fmt.Errorf("stop %s before deleting it", name))
+		return
+	}
+
+	if _, err := s.deps.DB.ExecContext(r.Context(), `DELETE FROM apps WHERE id = ?`, appID); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		writeErr(w, http.StatusNotFound, errors.New("app not found"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
+
+	// Uploaded jars are deliberately left on disk. They are the only copy of a
+	// deployed build and an accidental app deletion should not destroy them.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted":       name,
+		"artifactsKept": s.deps.Paths.RepoDir(),
+	})
 }
 
 func (s *Server) handleStartApp(w http.ResponseWriter, r *http.Request) {
@@ -210,12 +274,25 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, err)
 		return
 	}
+
+	var version, revision sql.NullString
+	_ = s.deps.DB.QueryRowContext(r.Context(), `
+		SELECT ar.version, p.revision
+		FROM instances i
+		LEFT JOIN artifacts ar ON ar.id = i.artifact_id
+		LEFT JOIN jvm_profiles p ON p.id = i.profile_id
+		WHERE i.app_id = (SELECT id FROM apps WHERE name = ?)`, name).
+		Scan(&version, &revision)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"app":        name,
-		"state":      h.State,
-		"pid":        h.PID,
-		"instance":   h.InstanceID,
-		"consoleLog": h.ConsoleLog,
+		"app":             name,
+		"state":           h.State,
+		"pid":             h.PID,
+		"instance":        h.InstanceID,
+		"consoleLog":      h.ConsoleLog,
+		"commandLine":     h.CommandLine,
+		"runningVersion":  version.String,
+		"runningRevision": revision.String,
 	})
 }
 

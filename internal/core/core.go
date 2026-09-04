@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjkim/jarvis/internal/api"
+	"github.com/sjkim/jarvis/internal/artifact"
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/logging"
@@ -71,6 +72,14 @@ func Bootstrap(ctx context.Context, root string, console bool) (*Core, error) {
 	if err := db.Migrate(ctx); err != nil {
 		c.closeAll()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	// An upload that was interrupted by a crash or a service restart leaves a
+	// partial file in the staging directory that nothing else will ever claim.
+	// The age cutoff keeps this from touching an upload in flight during a
+	// concurrent restart.
+	if err := artifact.NewRepository(paths.RepoDir()).CleanStaging(6 * time.Hour); err != nil {
+		log.Warn("could not clean the upload staging directory", "err", err)
 	}
 
 	localRunner := runner.NewLocalRunner(log.With("component", "runner"))

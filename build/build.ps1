@@ -7,11 +7,30 @@
 param(
     [string]$Version = "0.1.0-dev",
     [string]$Output = "bin\jarvis.exe",
-    [switch]$Release
+    [switch]$Release,
+
+    # The built UI is committed under internal/webui/dist so that `go build`
+    # works on a machine without Node. Pass this to rebuild it from web/.
+    [switch]$Web
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
+
+if ($Web) {
+    Write-Host "building admin UI" -ForegroundColor Cyan
+    Push-Location web
+    try {
+        if (-not (Test-Path node_modules)) {
+            npm install --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+        }
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+    } finally {
+        Pop-Location
+    }
+}
 
 $commit = "unknown"
 try {

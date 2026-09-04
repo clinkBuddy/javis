@@ -12,10 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/sjkim/jarvis/internal/artifact"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/jdk"
 	"github.com/sjkim/jarvis/internal/runner"
@@ -197,21 +200,21 @@ func (s *Supervisor) StartApp(ctx context.Context, appName string) (runner.Handl
 	}
 	s.mu.Unlock()
 
-	spec, appID, err := s.buildLaunchSpec(ctx, appName)
+	plan, err := s.buildLaunchSpec(ctx, appName)
 	if err != nil {
 		return runner.Handle{}, err
 	}
 
-	h, err := s.runner.Start(ctx, spec)
+	h, err := s.runner.Start(ctx, plan.spec)
 	if err != nil {
 		return runner.Handle{}, fmt.Errorf("start %s: %w", appName, err)
 	}
 
-	if err := s.insertInstance(ctx, appID, h, spec); err != nil {
+	if err := s.insertInstance(ctx, plan, h); err != nil {
 		s.log.Error("failed to record instance in DB", "app", appName, "err", err)
 	}
 
-	s.startWatcher(appName, appID, h)
+	s.startWatcher(appName, plan.appID, h)
 	return h, nil
 }
 
@@ -312,96 +315,242 @@ func (s *Supervisor) GetStatus(ctx context.Context, appName string) (runner.Hand
 	return h, nil
 }
 
-func (s *Supervisor) buildLaunchSpec(ctx context.Context, appName string) (runner.LaunchSpec, int64, error) {
-	var appID int64
-	var shutdownURL sql.NullString
-	var stopTimeout int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, shutdown_url, stop_timeout_sec FROM apps WHERE name = ?`, appName).
-		Scan(&appID, &shutdownURL, &stopTimeout)
-	if err != nil {
-		return runner.LaunchSpec{}, 0, fmt.Errorf("app %q not found: %w", appName, err)
-	}
-
-	// Read active JVM profile.
-	var heapMin, heapMax, gc sql.NullString
-	var jvmArgsJSON, progArgsJSON, envJSON string
-	var jdkID sql.NullInt64
-	err = s.db.QueryRowContext(ctx, `
-		SELECT jdk_id, heap_min, heap_max, gc, jvm_args, program_args, env
-		FROM jvm_profiles WHERE app_id = ? AND active = 1
-		ORDER BY revision DESC LIMIT 1`, appID).
-		Scan(&jdkID, &heapMin, &heapMax, &gc, &jvmArgsJSON, &progArgsJSON, &envJSON)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return runner.LaunchSpec{}, 0, fmt.Errorf("read jvm profile: %w", err)
-	}
-
-	// Resolve java.exe.
-	javaExe := "java"
-	if jdkID.Valid {
-		var javaPath string
-		if err := s.db.QueryRowContext(ctx, `SELECT java_exe FROM jdks WHERE id = ?`, jdkID.Int64).Scan(&javaPath); err == nil {
-			javaExe = javaPath
-		}
-	}
-	resolved, err := jdk.Resolve(ctx, javaExe)
-	if err != nil {
-		return runner.LaunchSpec{}, 0, fmt.Errorf("resolve java: %w", err)
-	}
-
-	// Build JVM args from the profile.
-	var jvmArgs []string
-	if heapMin.Valid && heapMin.String != "" {
-		jvmArgs = append(jvmArgs, "-Xms"+heapMin.String)
-	}
-	if heapMax.Valid && heapMax.String != "" {
-		jvmArgs = append(jvmArgs, "-Xmx"+heapMax.String)
-	}
-	if gc.Valid && gc.String != "" {
-		jvmArgs = append(jvmArgs, "-XX:+Use"+gc.String+"GC")
-	}
-	jvmArgs = append(jvmArgs, parseJSONStringArray(jvmArgsJSON)...)
-	progArgs := parseJSONStringArray(progArgsJSON)
-
-	// Find the active artifact.
-	var jarRelPath string
-	err = s.db.QueryRowContext(ctx, `
-		SELECT rel_path FROM artifacts
-		WHERE app_id = ? ORDER BY uploaded_at DESC LIMIT 1`, appID).Scan(&jarRelPath)
-	if err != nil {
-		return runner.LaunchSpec{}, 0, fmt.Errorf("no artifact for %q: %w", appName, err)
-	}
-	jarPath := filepath.Join(s.paths.RepoDir(), jarRelPath)
-
-	// Paths.
-	_ = s.paths.EnsureApp(appName)
-	workDir := s.paths.AppWorkDir(appName)
-	consoleLog := filepath.Join(s.paths.AppLogDir(appName),
-		fmt.Sprintf("console-%s.log", time.Now().Format("20060102-150405")))
-
-	return runner.LaunchSpec{
-		AppName:     appName,
-		JavaExe:     resolved.JavaExe,
-		JarPath:     jarPath,
-		JVMArgs:     jvmArgs,
-		ProgramArgs: progArgs,
-		WorkDir:     workDir,
-		ConsoleLog:  consoleLog,
-		ShutdownURL: shutdownURL.String,
-		StopGrace:   time.Duration(stopTimeout) * time.Second,
-	}, appID, nil
+// PreviewLaunch resolves what a start would run without running it. The UI
+// uses it to show the resolved java.exe, the promoted jar and the final
+// argument order before an operator commits to a restart.
+func (s *Supervisor) PreviewLaunch(ctx context.Context, appName string) (runner.LaunchSpec, error) {
+	plan, err := s.buildLaunchSpec(ctx, appName)
+	return plan.spec, err
 }
 
-func (s *Supervisor) insertInstance(ctx context.Context, appID int64, h runner.Handle, spec runner.LaunchSpec) error {
+// launchPlan is what buildLaunchSpec resolved: the spec to hand the runner,
+// plus the row ids that record which artifact and profile produced it.
+type launchPlan struct {
+	spec       runner.LaunchSpec
+	appID      int64
+	artifactID sql.NullInt64
+	profileID  sql.NullInt64
+}
+
+func (s *Supervisor) buildLaunchSpec(ctx context.Context, appName string) (launchPlan, error) {
+	var (
+		plan        launchPlan
+		shutdownURL sql.NullString
+		stopTimeout int
+		workDirCfg  sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, shutdown_url, stop_timeout_sec, work_dir, active_artifact_id
+		FROM apps WHERE name = ?`, appName).
+		Scan(&plan.appID, &shutdownURL, &stopTimeout, &workDirCfg, &plan.artifactID)
+	if err != nil {
+		return plan, fmt.Errorf("app %q not found: %w", appName, err)
+	}
+
+	profile, err := s.readActiveProfile(ctx, plan.appID)
+	if err != nil {
+		return plan, err
+	}
+	plan.profileID = profile.id
+
+	javaExe, err := s.resolveJavaExe(ctx, profile.jdkID)
+	if err != nil {
+		return plan, err
+	}
+
+	jarRelPath, jarSHA, err := s.promotedArtifact(ctx, appName, plan.artifactID)
+	if err != nil {
+		return plan, err
+	}
+	// Verifying here rather than trusting the row means a jar that was
+	// replaced or truncated on disk since upload fails with a checksum error
+	// instead of booting as if nothing had changed.
+	repo := artifact.NewRepository(s.paths.RepoDir())
+	if err := repo.Verify(jarRelPath, jarSHA); err != nil {
+		return plan, err
+	}
+
+	jvmArgs := profile.jvmArgs()
+	workDir := s.paths.AppWorkDir(appName)
+	if workDirCfg.Valid && workDirCfg.String != "" {
+		workDir = workDirCfg.String
+	}
+	_ = s.paths.EnsureApp(appName)
+
+	plan.spec = runner.LaunchSpec{
+		AppName:     appName,
+		JavaExe:     javaExe,
+		JarPath:     repo.AbsPath(jarRelPath),
+		JVMArgs:     jvmArgs,
+		ProgramArgs: profile.programArgs,
+		Env:         profile.envSlice(),
+		WorkDir:     workDir,
+		ConsoleLog: filepath.Join(s.paths.AppLogDir(appName),
+			fmt.Sprintf("console-%s.log", time.Now().Format("20060102-150405"))),
+		ShutdownURL: shutdownURL.String,
+		StopGrace:   time.Duration(stopTimeout) * time.Second,
+	}
+	return plan, nil
+}
+
+// activeProfile is the launch configuration of one app at one revision.
+type activeProfile struct {
+	id                       sql.NullInt64
+	jdkID                    sql.NullInt64
+	heapMin, heapMax, gcName string
+	extraJVMArgs             []string
+	programArgs              []string
+	env                      map[string]string
+}
+
+// jvmArgs assembles the flags in a fixed order: the shorthand fields first,
+// then the operator's own arguments. Later flags win in the JVM, so putting
+// the free-form list last is what lets an operator override a shorthand
+// without having to clear it.
+func (p activeProfile) jvmArgs() []string {
+	var args []string
+	if p.heapMin != "" {
+		args = append(args, "-Xms"+p.heapMin)
+	}
+	if p.heapMax != "" {
+		args = append(args, "-Xmx"+p.heapMax)
+	}
+	if p.gcName != "" {
+		args = append(args, "-XX:+Use"+p.gcName+"GC")
+	}
+	return append(args, p.extraJVMArgs...)
+}
+
+// envSlice merges the profile's variables over JARVIS' own environment.
+//
+// Replacing the environment wholesale would strip PATH and SystemRoot, which
+// the JVM needs to load its own DLLs, so the profile can only add and
+// override.
+func (p activeProfile) envSlice() []string {
+	if len(p.env) == 0 {
+		return nil
+	}
+
+	merged := os.Environ()
+	for k, v := range p.env {
+		prefix := strings.ToUpper(k) + "="
+		replaced := false
+		for i, existing := range merged {
+			if strings.HasPrefix(strings.ToUpper(existing), prefix) {
+				merged[i] = k + "=" + v
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			merged = append(merged, k+"="+v)
+		}
+	}
+	return merged
+}
+
+func (s *Supervisor) readActiveProfile(ctx context.Context, appID int64) (activeProfile, error) {
+	var (
+		p                                 activeProfile
+		heapMin, heapMax, gc              sql.NullString
+		jvmArgsJSON, progArgsJSON, envRaw string
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, jdk_id, heap_min, heap_max, gc, jvm_args, program_args, env
+		FROM jvm_profiles WHERE app_id = ? AND active = 1
+		ORDER BY revision DESC LIMIT 1`, appID).
+		Scan(&p.id, &p.jdkID, &heapMin, &heapMax, &gc, &jvmArgsJSON, &progArgsJSON, &envRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		// An app with no profile runs on defaults; that is a valid, if
+		// untuned, configuration.
+		return activeProfile{}, nil
+	}
+	if err != nil {
+		return activeProfile{}, fmt.Errorf("read jvm profile: %w", err)
+	}
+
+	p.heapMin, p.heapMax, p.gcName = heapMin.String, heapMax.String, gc.String
+	p.extraJVMArgs = parseJSONStringArray(jvmArgsJSON)
+	p.programArgs = parseJSONStringArray(progArgsJSON)
+	p.env = parseJSONStringMap(envRaw)
+	return p, nil
+}
+
+// resolveJavaExe picks the JDK for this launch: the profile's choice, else the
+// registered default, else whatever `java` is on PATH.
+func (s *Supervisor) resolveJavaExe(ctx context.Context, jdkID sql.NullInt64) (string, error) {
+	javaExe := "java"
+	query := `SELECT java_exe FROM jdks WHERE is_default = 1 LIMIT 1`
+	args := []any{}
+	if jdkID.Valid {
+		query, args = `SELECT java_exe FROM jdks WHERE id = ?`, []any{jdkID.Int64}
+	}
+	var configured string
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&configured); err == nil && configured != "" {
+		javaExe = configured
+	}
+
+	resolved, err := jdk.Resolve(ctx, javaExe)
+	if err != nil {
+		return "", fmt.Errorf("resolve java (%s): %w", javaExe, err)
+	}
+	if resolved.Redirected(javaExe) {
+		s.log.Info("java launcher redirected to its own installation",
+			"requested", javaExe, "using", resolved.JavaExe)
+	}
+	return resolved.JavaExe, nil
+}
+
+// promotedArtifact returns the jar an app should run.
+//
+// Falling back to the newest upload keeps apps created before promotion
+// existed startable, but it is logged because it means nobody has chosen a
+// version and the next upload will change what runs.
+func (s *Supervisor) promotedArtifact(ctx context.Context, appName string, artifactID sql.NullInt64) (relPath, sha256 string, err error) {
+	if artifactID.Valid {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT rel_path, sha256 FROM artifacts WHERE id = ?`, artifactID.Int64).
+			Scan(&relPath, &sha256)
+		if err == nil {
+			return relPath, sha256, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", "", err
+		}
+		s.log.Warn("promoted artifact is missing; falling back to the newest upload",
+			"app", appName, "artifactId", artifactID.Int64)
+	}
+
+	err = s.db.QueryRowContext(ctx, `
+		SELECT rel_path, sha256 FROM artifacts
+		WHERE app_id = (SELECT id FROM apps WHERE name = ?)
+		ORDER BY uploaded_at DESC LIMIT 1`, appName).Scan(&relPath, &sha256)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", fmt.Errorf("app %q has no uploaded jar yet", appName)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	s.log.Warn("no version promoted; using the newest upload", "app", appName, "jar", relPath)
+	return relPath, sha256, nil
+}
+
+// insertInstance records the launch, including which artifact and profile
+// produced it. Without those ids a running process could not be traced back to
+// the version and settings it was started with, which is exactly what an
+// operator needs to know when deciding whether a restart is safe.
+func (s *Supervisor) insertInstance(ctx context.Context, plan launchPlan, h runner.Handle) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO instances (app_id, state, instance_uuid, pid, process_create_time,
-			command_line, console_log, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+			artifact_id, profile_id, command_line, console_log, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
 		ON CONFLICT(app_id) DO UPDATE SET
 			state = excluded.state,
 			instance_uuid = excluded.instance_uuid,
 			pid = excluded.pid,
 			process_create_time = excluded.process_create_time,
+			artifact_id = excluded.artifact_id,
+			profile_id = excluded.profile_id,
 			command_line = excluded.command_line,
 			console_log = excluded.console_log,
 			started_at = excluded.started_at,
@@ -410,8 +559,8 @@ func (s *Supervisor) insertInstance(ctx context.Context, appID int64, h runner.H
 			restart_count = 0,
 			last_error = NULL,
 			updated_at = datetime('now')`,
-		appID, string(runner.StateRunning), h.InstanceID, h.PID, h.CreateTime,
-		h.CommandLine, h.ConsoleLog)
+		plan.appID, string(runner.StateRunning), h.InstanceID, h.PID, h.CreateTime,
+		plan.artifactID, plan.profileID, h.CommandLine, h.ConsoleLog)
 	return err
 }
 
@@ -500,6 +649,15 @@ func parseJSONStringArray(raw string) []string {
 		return nil
 	}
 	var out []string
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
+}
+
+func parseJSONStringMap(raw string) map[string]string {
+	if raw == "" || raw == "{}" || raw == "null" {
+		return nil
+	}
+	var out map[string]string
 	_ = json.Unmarshal([]byte(raw), &out)
 	return out
 }

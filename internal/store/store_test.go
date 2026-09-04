@@ -52,12 +52,42 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("second migrate: %v", err)
 	}
 
+	// Compared against the embedded set rather than a hardcoded number, so
+	// adding a migration does not break this test.
+	names, err := migrationNames()
+	if err != nil {
+		t.Fatalf("list migrations: %v", err)
+	}
 	var n int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("schema_migrations rows = %d, want 1", n)
+	if n != len(names) {
+		t.Errorf("schema_migrations rows = %d, want %d", n, len(names))
+	}
+}
+
+// Every app column the launcher reads must exist after migration; a missing
+// one only shows up as a scan error at the moment someone tries to start an
+// app.
+func TestMigrateAddsActiveArtifactColumn(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `INSERT INTO apps (name) VALUES ('order-api')`); err != nil {
+		t.Fatalf("insert app: %v", err)
+	}
+	var id, activeArtifact any
+	if err := db.QueryRowContext(ctx,
+		`SELECT id, active_artifact_id FROM apps WHERE name = 'order-api'`).
+		Scan(&id, &activeArtifact); err != nil {
+		t.Fatalf("select active_artifact_id: %v", err)
+	}
+	if activeArtifact != nil {
+		t.Errorf("active_artifact_id = %v on a new app, want NULL", activeArtifact)
 	}
 }
 

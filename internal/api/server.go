@@ -57,6 +57,9 @@ func (s *Server) routes() http.Handler {
 		r.Get("/health", s.handleHealth)
 		r.Get("/version", s.handleVersion)
 		s.registerAppRoutes(r)
+		s.registerArtifactRoutes(r)
+		s.registerProfileRoutes(r)
+		s.registerJDKRoutes(r)
 	})
 
 	r.Handle("/*", webui.Handler())
