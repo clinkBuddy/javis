@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"github.com/sjkim/jarvis/internal/winfw"
 )
 
 var (
@@ -81,6 +83,8 @@ func Install(root string) error {
 
 // Uninstall stops and removes the service. Managed java processes keep running.
 func Uninstall() error {
+	_ = winfw.Remove()
+
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect to service manager (run as administrator): %w", err)

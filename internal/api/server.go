@@ -20,6 +20,7 @@ import (
 	"github.com/sjkim/jarvis/internal/store"
 	"github.com/sjkim/jarvis/internal/supervisor"
 	"github.com/sjkim/jarvis/internal/webui"
+	"github.com/sjkim/jarvis/internal/winfw"
 )
 
 type Deps struct {
@@ -106,6 +107,10 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("bind %s: %w", s.deps.Cfg.Server.Addr, err)
 	}
 	s.ln = ln
+
+	if err := winfw.Allow(s.deps.Cfg.Server.Addr); err != nil {
+		s.deps.Log.Warn("could not open windows firewall for the admin UI", "err", err)
+	}
 
 	tls := s.deps.Cfg.Server.TLS
 	scheme := "http"

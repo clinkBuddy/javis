@@ -72,6 +72,9 @@ Section "JARVIS" SecInstall
     Abort
   ${EndIf}
 
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=JARVIS'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name=JARVIS dir=in action=allow program="$INSTDIR\jarvis.exe" enable=yes profile=any protocol=TCP localport=9527'
+
   ; Older builds registered a notification-area icon at logon.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "JARVIS Tray"
 
@@ -95,6 +98,7 @@ Section "Uninstall"
   SetShellVarContext all
 
   nsExec::ExecToLog '"$INSTDIR\jarvis.exe" uninstall'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name=JARVIS'
   nsExec::ExecToLog 'taskkill /F /IM jarvis.exe'
   Sleep 400
 

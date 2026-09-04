@@ -9,11 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DefaultAddr binds to loopback only. Exposing the UI on the LAN is an
-// explicit opt-in because uploading a jar is equivalent to remote code
-// execution on the host.
-const DefaultAddr = "127.0.0.1:9527"
-
 type Config struct {
 	// DataRoot is normally empty, meaning "use the directory this config file
 	// lives in". It exists so an operator can relocate the jar repository to a
@@ -78,6 +73,11 @@ func Load(root string) (*Config, Paths, error) {
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, p, fmt.Errorf("parse %s: %w", p.ConfigFile(), err)
 		}
+		if rewritten, ok := migrateListenAddr(data, cfg); ok {
+			if err := writeFileAtomic(p.ConfigFile(), rewritten); err != nil {
+				return nil, p, fmt.Errorf("update listen address in %s: %w", p.ConfigFile(), err)
+			}
+		}
 	}
 
 	cfg.applyDefaults()
@@ -122,9 +122,8 @@ const defaultConfigYAML = `# JARVIS configuration
 # Changes take effect on the next service restart.
 
 server:
-  # Loopback only by default. Binding to 0.0.0.0 exposes jar upload and process
-  # control to the network, so enable TLS and review user roles before doing so.
-  addr: "127.0.0.1:9527"
+  # All interfaces. Restrict to 127.0.0.1:9527 to keep the UI on this machine only.
+  addr: "0.0.0.0:9527"
   tls:
     enabled: false
     # Leave empty to generate a self-signed certificate on first start.
