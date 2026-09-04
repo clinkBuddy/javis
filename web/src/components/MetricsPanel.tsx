@@ -51,7 +51,7 @@ export function HostMetrics() {
 
   return (
     <section className="card">
-      <h2>이 PC</h2>
+      <h2>JAVIS Server</h2>
       <div className="metric-grid">
         <div>
           <div className="metric-label">CPU</div>

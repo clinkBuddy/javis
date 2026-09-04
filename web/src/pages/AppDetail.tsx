@@ -7,6 +7,7 @@ import { StateBadge } from "../components/StateBadge";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { ProfileForm } from "../components/ProfileForm";
 import { MetricsPanel } from "../components/MetricsPanel";
+import { TrafficPanel } from "../components/TrafficPanel";
 import { LogPanel } from "../components/LogPanel";
 import { AppSettings } from "../components/AppSettings";
 import { formatBytes } from "../api";
@@ -15,6 +16,7 @@ export function AppDetail() {
   const { name = "" } = useParams();
   const status = usePolled(() => api.status(name), 3_000);
   const app = usePolled(() => api.getApp(name), 10_000);
+  const traffic = usePolled(() => api.appTraffic(name), 3_000);
   const action = useAction();
   const { can } = useSession();
 
@@ -31,7 +33,7 @@ export function AppDetail() {
   return (
     <div className="page">
       <div className="breadcrumb">
-        <Link to="/">앱</Link>
+        <Link to="/">모니터</Link>
         <span>/</span>
         <span>{name}</span>
       </div>
@@ -111,6 +113,7 @@ export function AppDetail() {
         </section>
       )}
 
+      {running && <TrafficPanel traffic={traffic.data} />}
       {running && <MetricsPanel appName={name} />}
       <LogPanel appName={name} />
 

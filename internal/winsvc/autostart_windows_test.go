@@ -4,8 +4,8 @@ package winsvc
 
 import "testing"
 
-// The first version of EnableTrayAutostart used fmt's %q and wrote
-// "C:\\dev\\jarvis\\bin\\jarvis.exe" into the Run key. These cases pin the
+// The first version of elevated relaunch used fmt's %q and wrote
+// "C:\\dev\\jarvis\\bin\\jarvis.exe" into a command line. These cases pin the
 // Windows quoting rules so that regression cannot come back.
 func TestQuoteArg(t *testing.T) {
 	cases := []struct {
@@ -19,11 +19,9 @@ func TestQuoteArg(t *testing.T) {
 		{"empty", ``, `""`},
 		{"unc path", `\\server\share\jarvis.exe`, `"\\server\share\jarvis.exe"`},
 
-		// A trailing backslash must be doubled or it escapes the closing quote.
 		{"trailing backslash", `C:\data\`, `"C:\data\\"`},
 		{"two trailing backslashes", `C:\data\\`, `"C:\data\\\\"`},
 
-		// Embedded quotes: N backslashes before a quote become 2N+1.
 		{"embedded quote", `a"b`, `"a\"b"`},
 		{"backslash then quote", `a\"b`, `"a\\\"b"`},
 	}

@@ -88,8 +88,9 @@ const (
 // Bootstrap creates the first admin account if no users exist.
 //
 // The well-known password is an exception to MinPasswordLength so the operator
-// can sign in immediately. Subsequent password changes still require 12
-// characters. Existing accounts are left alone: a restart must not reset them.
+// can sign in once. must_change then blocks every other API until a new
+// password of at least 12 characters is set. Existing accounts are left alone
+// except when they still use admin/admin — that case is forced to change too.
 func (s *Service) Bootstrap(ctx context.Context, dataRoot string) error {
 	_ = dataRoot
 
@@ -98,6 +99,7 @@ func (s *Service) Bootstrap(ctx context.Context, dataRoot string) error {
 		return fmt.Errorf("auth: count users: %w", err)
 	}
 	if count > 0 {
+		s.forceChangeIfDefaultPassword(ctx)
 		return nil
 	}
 
@@ -108,13 +110,45 @@ func (s *Service) Bootstrap(ctx context.Context, dataRoot string) error {
 
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO users (username, password_hash, role, must_change)
-		VALUES (?, ?, 'admin', 0)`, DefaultAdminUsername, hash); err != nil {
+		VALUES (?, ?, 'admin', 1)`, DefaultAdminUsername, hash); err != nil {
 		return fmt.Errorf("auth: create initial admin: %w", err)
 	}
 
 	s.log.Info("created the initial administrator account",
 		"username", DefaultAdminUsername)
 	return nil
+}
+
+// forceChangeIfDefaultPassword marks the bootstrap admin so it cannot use the
+// well-known password as a standing credential. Existing installs that still
+// have admin/admin pick this up on the next start.
+func (s *Service) forceChangeIfDefaultPassword(ctx context.Context) {
+	var id int64
+	var hash string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, password_hash FROM users
+		WHERE username = ? AND disabled = 0`, DefaultAdminUsername).Scan(&id, &hash)
+	if err != nil {
+		return
+	}
+	if VerifyPassword(hash, DefaultAdminPassword) != nil {
+		return
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE users SET must_change = 1 WHERE id = ?`, id)
+}
+
+// DefaultCredentialsRemain is true while the bootstrap admin can still sign in
+// with admin/admin. The login form uses this to hide the hint once that
+// password has been replaced.
+func (s *Service) DefaultCredentialsRemain(ctx context.Context) bool {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT password_hash FROM users
+		WHERE username = ? AND disabled = 0`, DefaultAdminUsername).Scan(&hash)
+	if err != nil {
+		return false
+	}
+	return VerifyPassword(hash, DefaultAdminPassword) == nil
 }
 
 // Login verifies credentials and opens a session, returning the cookie value.
@@ -442,6 +476,35 @@ func (s *Service) DeleteUser(ctx context.Context, userID int64) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
 		return err
 	})
+}
+
+// ChangeUsername renames an account. Sessions stay valid because they key
+// off user id, not the name.
+func (s *Service) ChangeUsername(ctx context.Context, userID int64, next string) error {
+	next = strings.TrimSpace(strings.ToLower(next))
+	if err := ValidateUsername(next); err != nil {
+		return err
+	}
+
+	var current string
+	if err := s.db.QueryRowContext(ctx, `SELECT username FROM users WHERE id = ?`, userID).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return err
+	}
+	if current == next {
+		return nil
+	}
+
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET username = ? WHERE id = ?`, next, userID); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return ErrUserExists
+		}
+		return err
+	}
+	s.log.Info("username changed", "from", current, "to", next)
+	return nil
 }
 
 // ValidateUsername keeps names readable and safe to put in a URL or a log line.

@@ -5,7 +5,7 @@
 # not show a window hide the console themselves at startup instead.
 [CmdletBinding()]
 param(
-    [string]$Version = "0.1.0-dev",
+    [string]$Version = "0.1.0",
     [string]$Output = "bin\jarvis.exe",
     [switch]$Release,
 

@@ -34,8 +34,11 @@ export interface App {
   activeVersion?: string;
   artifactCount: number;
   restartCount: number;
-  cpuPercent?: number;
-  rssBytes?: number;
+	cpuPercent?: number;
+	rssBytes?: number;
+	threads?: number;
+	handles?: number;
+	privateBytes?: number;
 }
 
 export interface AppStatus {
@@ -176,6 +179,53 @@ export interface Me extends User {
   csrfToken: string;
 }
 
+export interface Ban {
+  ip: string;
+  reason: string;
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface HTTPExchange {
+  at: string;
+  method: string;
+  path: string;
+  status: number;
+  ms: number;
+  remote?: string;
+}
+
+export interface TrafficPoint {
+  ts: number;
+  tps: number;
+  active: number;
+  avgMs: number;
+  errors: number;
+}
+
+export interface TrafficSnapshot {
+  appId: number;
+  appName: string;
+  source: string;
+  active: number;
+  listen?: number[];
+  tps: number;
+  errorRate: number;
+  avgMs: number;
+  maxMs: number;
+  history: TrafficPoint[];
+  recent: HTTPExchange[];
+}
+
+export interface MetricsOverview {
+  host: { latest: HostReading; history: HostReading[] };
+  apps: {
+    latest: Record<string, ProcessReading>;
+    history: Record<string, ProcessReading[]>;
+  };
+  traffic?: Record<string, TrafficSnapshot>;
+}
+
 export interface AuditEntry {
   id: number;
   at: string;
@@ -281,6 +331,7 @@ async function errorBody(res: Response): Promise<{ message: string; code: string
 
 export const api = {
   health: () => request<Health>("/health"),
+  authSetup: () => request<{ defaultHint: boolean }>("/auth/setup"),
 
   login: (username: string, password: string) =>
     request<Me>("/auth/login", {
@@ -293,6 +344,11 @@ export const api = {
     request<{ status: string }>("/auth/password", {
       method: "POST",
       body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+  changeUsername: (username: string) =>
+    request<{ username: string }>("/auth/username", {
+      method: "POST",
+      body: JSON.stringify({ username }),
     }),
 
   listUsers: () => request<User[]>("/users"),
@@ -310,6 +366,11 @@ export const api = {
     request<{ id: number }>(`/users/${id}/password`, {
       method: "POST",
       body: JSON.stringify({ newPassword }),
+    }),
+  renameUser: (id: number, username: string) =>
+    request<{ id: number; username: string }>(`/users/${id}/username`, {
+      method: "POST",
+      body: JSON.stringify({ username }),
     }),
   deleteUser: (id: number) => request<{ deleted: number }>(`/users/${id}`, { method: "DELETE" }),
 
@@ -341,9 +402,21 @@ export const api = {
     request<{ latest: ProcessReading; history: ProcessReading[] }>(
       `/apps/${encodeURIComponent(name)}/metrics?minutes=${minutes}`,
     ),
+  appTraffic: (name: string) =>
+    request<TrafficSnapshot>(`/apps/${encodeURIComponent(name)}/traffic`),
   hostNow: () => request<HostReading>("/host"),
   hostMetrics: (minutes = 60) =>
     request<HostReading[]>(`/host/metrics?minutes=${minutes}`),
+  metricsOverview: (minutes = 60) =>
+    request<MetricsOverview>(`/metrics/overview?minutes=${minutes}`),
+  listBans: () => request<Ban[]>("/bans"),
+  createBan: (ip: string, reason?: string) =>
+    request<{ ip: string }>("/bans", {
+      method: "POST",
+      body: JSON.stringify({ ip, reason }),
+    }),
+  deleteBan: (ip: string) =>
+    request<{ unbanned: string }>(`/bans/${encodeURIComponent(ip)}`, { method: "DELETE" }),
   appLogs: (name: string, tail = 200) =>
     request<{ path: string; size: number; lines: string[] }>(
       `/apps/${encodeURIComponent(name)}/logs?tail=${tail}`,
@@ -456,6 +529,19 @@ export function uploadArtifact(
 
     xhr.send(form);
   });
+}
+
+export function formatDuration(startedAt: string | undefined): string {
+  if (!startedAt) return "—";
+  const start = Date.parse(startedAt.replace(" ", "T") + "Z");
+  if (Number.isNaN(start)) return "—";
+  const sec = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 48) return `${Math.floor(h / 24)}일`;
+  if (h > 0) return `${h}시간 ${m}분`;
+  if (m > 0) return `${m}분`;
+  return `${sec}초`;
 }
 
 export function formatBytes(bytes: number): string {

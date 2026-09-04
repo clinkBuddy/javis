@@ -20,9 +20,9 @@ const swHide = 0
 //
 // The binary is linked as a console application on purpose: `-H=windowsgui`
 // would silence the CLI subcommands, which are the primary troubleshooting
-// tool. Instead the modes that should not show a window (service, tray) hide
-// it at startup. Returns false when there is no console, which is the normal
-// case for a service started by the SCM.
+// tool. Instead the modes that should not show a window (service, shortcut
+// launch) hide it at startup. Returns false when there is no console, which
+// is the normal case for a service started by the SCM.
 func HideConsole() bool {
 	hwnd, _, _ := procGetConsoleWindow.Call()
 	if hwnd == 0 {

@@ -33,6 +33,7 @@ type Collector struct {
 	prevHostAt time.Time
 	latest     map[int64]ProcessReading
 	latestHost HostReading
+	traffic    map[int64]*appTraffic
 }
 
 func NewCollector(db *store.DB, diskPath string, log *slog.Logger) *Collector {
@@ -43,6 +44,7 @@ func NewCollector(db *store.DB, diskPath string, log *slog.Logger) *Collector {
 		prevProc:   map[int64]rawProc{},
 		prevProcAt: map[int64]time.Time{},
 		latest:     map[int64]ProcessReading{},
+		traffic:    map[int64]*appTraffic{},
 	}
 }
 
@@ -74,6 +76,7 @@ func (c *Collector) tick(ctx context.Context) {
 
 	c.sampleHost(now, ts)
 	c.sampleApps(ctx, now, ts)
+	c.sampleTraffic(ctx)
 }
 
 type liveRow struct {
@@ -228,6 +231,36 @@ func (c *Collector) History(ctx context.Context, appID int64, since time.Time) (
 		}
 		r.AppID = appID
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// HistoryAll returns stored samples for every app in one query so the
+// dashboard does not fan out per process.
+func (c *Collector) HistoryAll(ctx context.Context, since time.Time) (map[int64][]ProcessReading, error) {
+	res := "raw"
+	if time.Since(since) > 2*time.Hour {
+		res = "1m"
+	}
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT app_id, ts, COALESCE(cpu_percent,0), COALESCE(rss_bytes,0), COALESCE(private_bytes,0),
+			   COALESCE(threads,0), COALESCE(handles,0)
+		FROM metric_samples
+		WHERE resolution = ? AND ts >= ?
+		ORDER BY app_id, ts`, res, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[int64][]ProcessReading{}
+	for rows.Next() {
+		var r ProcessReading
+		if err := rows.Scan(&r.AppID, &r.TS, &r.CPUPercent, &r.RSSBytes, &r.PrivateBytes,
+			&r.Threads, &r.Handles); err != nil {
+			return nil, err
+		}
+		out[r.AppID] = append(out[r.AppID], r)
 	}
 	return out, rows.Err()
 }

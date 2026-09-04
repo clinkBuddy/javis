@@ -1,13 +1,15 @@
-//go:build windows
-
-package tray
+package appicon
 
 import (
 	"encoding/binary"
 )
 
+// ICO is the 32×32 product image as a complete ICO file. The installer writes
+// this next to jarvis.exe so the desktop shortcut can use it.
+func ICO() []byte { return buildIcon() }
+
 // buildIcon returns a 32×32 ICO in memory. The image is the same blue mark
-// the admin UI uses, so the notification area matches the browser tab.
+// the admin UI uses, so the shortcut matches the browser tab.
 func buildIcon() []byte {
 	const size = 32
 	pixels := make([]byte, size*size*4) // BGRA, top-down for us; BMP is bottom-up
@@ -32,7 +34,6 @@ func buildIcon() []byte {
 }
 
 func inMark(x, y, size int) bool {
-	// A rounded square with a 2px margin.
 	m := 2
 	if x < m || y < m || x >= size-m || y >= size-m {
 		return false
@@ -60,7 +61,6 @@ func dist2(x, y, cx, cy int) int {
 }
 
 func drawJ(px []byte, size int) {
-	// A blocky J so it stays readable at 16px after Windows scales the icon.
 	set := func(x, y int) {
 		if x < 0 || y < 0 || x >= size || y >= size {
 			return
@@ -113,7 +113,6 @@ func encodeICO(topDownBGRA []byte, size int) []byte {
 
 	xor := hdr[40:]
 	for y := 0; y < size; y++ {
-		// BMP rows are bottom-up.
 		src := (size - 1 - y) * size * 4
 		dst := y * size * 4
 		copy(xor[dst:dst+size*4], topDownBGRA[src:src+size*4])

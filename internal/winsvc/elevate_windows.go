@@ -20,8 +20,8 @@ const (
 )
 
 // Default service DACL plus start/stop/query for interactive users and the
-// local Users group. Without those ACEs a double-clicked tray cannot control
-// the service it just registered.
+// local Users group. Without those ACEs a double-clicked shortcut cannot
+// control the service it just registered.
 const interactiveServiceSDDL = `D:` +
 	`(A;;CCLCSWRPWPDTLOCRRC;;;SY)` +
 	`(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)` +
@@ -66,20 +66,20 @@ func IsElevated() bool {
 	return token.IsElevated()
 }
 
-// EnsureInstalled registers the Windows service if it is missing, grants
-// interactive users start/stop rights, and records tray autostart for this
-// user. A non-elevated caller is relaunched once via UAC to do the install.
+// EnsureInstalled registers the Windows service if it is missing and grants
+// interactive users start/stop rights. A non-elevated caller is relaunched
+// once via UAC to do the install.
 func EnsureInstalled(root string) error {
 	needInstall := !Installed()
 	needACL := Installed() && !CanControl()
 
 	if !needInstall && !needACL {
-		_ = EnableTrayAutostart(root)
+		_ = DisableTrayAutostart()
 		return nil
 	}
 
 	if !IsElevated() {
-		args := []string{"install", "--start=false", "--tray=false"}
+		args := []string{"install", "--start=false"}
 		if !needInstall && needACL {
 			args = append(args, "--acl-only")
 		}
@@ -95,7 +95,7 @@ func EnsureInstalled(root string) error {
 		if !CanControl() {
 			return errors.New("서비스를 시작·중지할 권한이 없습니다. 관리자 권한으로 다시 실행하세요")
 		}
-		_ = EnableTrayAutostart(root)
+		_ = DisableTrayAutostart()
 		return nil
 	}
 
@@ -107,7 +107,7 @@ func EnsureInstalled(root string) error {
 	if err := AllowInteractiveControl(); err != nil {
 		return err
 	}
-	_ = EnableTrayAutostart(root)
+	_ = DisableTrayAutostart()
 	return nil
 }
 

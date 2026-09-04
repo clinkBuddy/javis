@@ -19,6 +19,7 @@ export function Users() {
   const { user: me } = useSession();
   const [creating, setCreating] = useState(false);
   const [resetting, setResetting] = useState<User | undefined>();
+  const [renaming, setRenaming] = useState<User | undefined>();
 
   const act = async (fn: () => Promise<unknown>) => {
     if (await action.run(fn)) {
@@ -65,6 +66,17 @@ export function Users() {
             users.refresh();
           }}
           onCancel={() => setResetting(undefined)}
+        />
+      )}
+
+      {renaming && (
+        <RenameUserForm
+          target={renaming}
+          onDone={() => {
+            setRenaming(undefined);
+            users.refresh();
+          }}
+          onCancel={() => setRenaming(undefined)}
         />
       )}
 
@@ -115,6 +127,13 @@ export function Users() {
                   </td>
                   <td className="small nowrap">{u.lastLoginAt || "—"}</td>
                   <td className="right nowrap">
+                    <button
+                      className="btn btn-sm"
+                      disabled={action.busy}
+                      onClick={() => setRenaming(u)}
+                    >
+                      아이디 변경
+                    </button>
                     <button
                       className="btn btn-sm"
                       disabled={action.busy}
@@ -312,6 +331,54 @@ function ResetPasswordForm({
         </button>
         <button type="submit" className="btn btn-primary" disabled={action.busy}>
           {action.busy ? "적용 중…" : "재설정"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function RenameUserForm({
+  target,
+  onDone,
+  onCancel,
+}: {
+  target: User;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [username, setUsername] = useState(target.username);
+  const action = useAction();
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (await action.run(() => api.renameUser(target.id, username.trim().toLowerCase()))) {
+      onDone();
+    }
+  };
+
+  return (
+    <form className="card form" onSubmit={submit}>
+      <h2>
+        <code>{target.username}</code> 아이디 변경
+      </h2>
+      <label className="narrow">
+        <span>새 아이디</span>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value.toLowerCase())}
+          autoComplete="username"
+          required
+          autoFocus
+        />
+        <small className="muted">영문 소문자·숫자·. - _ · 2–32자</small>
+      </label>
+      {action.error && <div className="alert">{action.error}</div>}
+      <div className="form-actions">
+        <button type="button" className="btn" onClick={onCancel}>
+          취소
+        </button>
+        <button type="submit" className="btn btn-primary" disabled={action.busy}>
+          {action.busy ? "변경 중…" : "변경"}
         </button>
       </div>
     </form>

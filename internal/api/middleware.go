@@ -23,6 +23,7 @@ type ctxKey int
 const (
 	ctxUser ctxKey = iota
 	ctxToken
+	ctxPeerIP
 )
 
 // userOf returns the authenticated account, if the handler is behind
@@ -35,6 +36,13 @@ func userOf(r *http.Request) (auth.User, bool) {
 func tokenOf(r *http.Request) string {
 	t, _ := r.Context().Value(ctxToken).(string)
 	return t
+}
+
+func peerIP(r *http.Request) string {
+	if ip, ok := r.Context().Value(ctxPeerIP).(string); ok && ip != "" {
+		return ip
+	}
+	return clientIP(r)
 }
 
 // requireAuth rejects unauthenticated requests.
@@ -72,6 +80,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 func isPasswordChangeRoute(r *http.Request) bool {
 	return r.URL.Path == "/api/v1/auth/password" ||
+		r.URL.Path == "/api/v1/auth/username" ||
 		r.URL.Path == "/api/v1/auth/me" ||
 		r.URL.Path == "/api/v1/auth/logout"
 }

@@ -1,6 +1,4 @@
-//go:build windows
-
-package tray
+package appicon
 
 import (
 	"encoding/binary"

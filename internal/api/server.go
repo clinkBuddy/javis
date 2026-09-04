@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/sjkim/jarvis/internal/auth"
+	"github.com/sjkim/jarvis/internal/ban"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/metrics"
 	"github.com/sjkim/jarvis/internal/store"
@@ -27,6 +28,7 @@ type Deps struct {
 	Paths      config.Paths
 	DB         *store.DB
 	Auth       *auth.Service
+	Bans       *ban.Service
 	Supervisor *supervisor.Supervisor
 	Metrics    *metrics.Collector
 	Started    time.Time
@@ -52,6 +54,9 @@ func New(d Deps) *Server {
 
 func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(s.capturePeer)
+	r.Use(s.dropBanned)
+	r.Use(s.detectProbes)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(s.requestLogger)
@@ -84,6 +89,7 @@ func (s *Server) routes() http.Handler {
 			s.registerJDKRoutes(r)
 			s.registerMetricRoutes(r)
 			s.registerLogRoutes(r)
+			s.registerBanRoutes(r)
 		})
 	})
 

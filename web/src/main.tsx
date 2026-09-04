@@ -8,6 +8,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { AppDetail } from "./pages/AppDetail";
 import { Jdks } from "./pages/Jdks";
 import { Users } from "./pages/Users";
+import { Bans } from "./pages/Bans";
 import { ChangePassword } from "./pages/ChangePassword";
 import "./styles.css";
 
@@ -26,6 +27,7 @@ const router = createHashRouter([
       // here would only duplicate that decision in a place that cannot
       // enforce it.
       { path: "users", element: <Users /> },
+      { path: "bans", element: <Bans /> },
       { path: "account", element: <ChangePassword forced={false} /> },
     ],
   },

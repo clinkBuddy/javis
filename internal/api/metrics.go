@@ -8,12 +8,15 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sjkim/jarvis/internal/auth"
+	"github.com/sjkim/jarvis/internal/metrics"
 )
 
 func (s *Server) registerMetricRoutes(r chi.Router) {
 	r.Get("/host", s.requireRole(auth.RoleViewer, s.handleHostNow))
 	r.Get("/host/metrics", s.requireRole(auth.RoleViewer, s.handleHostHistory))
+	r.Get("/metrics/overview", s.requireRole(auth.RoleViewer, s.handleMetricsOverview))
 	r.Get("/apps/{name}/metrics", s.requireRole(auth.RoleViewer, s.handleAppMetrics))
+	r.Get("/apps/{name}/traffic", s.requireRole(auth.RoleViewer, s.handleAppTraffic))
 }
 
 func (s *Server) handleHostNow(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +41,35 @@ func (s *Server) handleHostHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, hist)
 }
 
+func (s *Server) handleMetricsOverview(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Metrics == nil {
+		writeErr(w, http.StatusServiceUnavailable, errNoMetrics)
+		return
+	}
+	since := parseSince(r, time.Hour)
+	hostHist, err := s.deps.Metrics.HostHistory(r.Context(), since)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	appHist, err := s.deps.Metrics.HistoryAll(r.Context(), since)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"host": map[string]any{
+			"latest":  s.deps.Metrics.LatestHost(),
+			"history": hostHist,
+		},
+		"apps": map[string]any{
+			"latest":  s.deps.Metrics.LatestAll(),
+			"history": appHist,
+		},
+		"traffic": s.deps.Metrics.LatestTrafficAll(),
+	})
+}
+
 func (s *Server) handleAppMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Metrics == nil {
 		writeErr(w, http.StatusServiceUnavailable, errNoMetrics)
@@ -59,6 +91,24 @@ func (s *Server) handleAppMetrics(w http.ResponseWriter, r *http.Request) {
 		"latest":  latest,
 		"history": hist,
 	})
+}
+
+func (s *Server) handleAppTraffic(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Metrics == nil {
+		writeErr(w, http.StatusServiceUnavailable, errNoMetrics)
+		return
+	}
+	appID, err := s.appIDByName(r, chi.URLParam(r, "name"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	snap, ok := s.deps.Metrics.LatestTraffic(appID)
+	if !ok {
+		writeJSON(w, http.StatusOK, metrics.TrafficSnapshot{AppID: appID})
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func parseSince(r *http.Request, fallback time.Duration) time.Time {

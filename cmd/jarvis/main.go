@@ -4,12 +4,12 @@
 //
 // One binary, several modes:
 //
-//	jarvis run          foreground, logs to the console (development)
+//	jarvis              desktop shortcut: start the service, or open the UI
+//	jarvis run          foreground, logs to the console
 //	jarvis service      entry point used by the Service Control Manager
 //	jarvis install      register the service for automatic start
 //	jarvis uninstall    stop and deregister the service
 //	jarvis start|stop|status
-//	jarvis tray         per-user notification area icon
 //	jarvis stopper      internal helper that delivers Ctrl+C to a managed process
 package main
 
@@ -20,12 +20,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/core"
-	"github.com/sjkim/jarvis/internal/tray"
 	"github.com/sjkim/jarvis/internal/winproc"
 	"github.com/sjkim/jarvis/internal/winsvc"
 )
@@ -44,9 +42,9 @@ func dispatch(args []string) error {
 		if isSvc, err := winsvc.IsService(); err == nil && isSvc {
 			return winsvc.Run("")
 		}
-		// A double-click of jarvis.exe should land in the notification area,
-		// not print a usage page that nobody will see.
-		return cmdTray(nil)
+		// A double-click of jarvis.exe (the desktop shortcut) starts the
+		// service when it is down, or opens the admin UI when it is up.
+		return cmdLaunch(nil)
 	}
 
 	cmd, rest := args[0], args[1:]
@@ -65,8 +63,12 @@ func dispatch(args []string) error {
 		return cmdStop(rest)
 	case "status":
 		return cmdStatus(rest)
+	case "open":
+		return cmdLaunch(rest)
 	case "tray":
-		return cmdTray(rest)
+		// Older installers registered HKCU Run → `jarvis tray`. Do the
+		// shortcut action once and drop that leftover autostart entry.
+		return cmdLaunch(rest)
 	case "proc":
 		return cmdProc(rest)
 	case "stopper":
@@ -89,15 +91,15 @@ func usage(w *os.File) {
 Usage: jarvis <command> [flags]
 
 Commands:
-  (no args)          Install if needed, show the tray icon, start the service.
-  run                Run the core in the foreground (development).
+  (no args)          If the service is stopped, start it. If it is running,
+                     open the admin UI. Used by the desktop shortcut.
+  run                Run the core in the foreground.
   service            Service Control Manager entry point.
   install            Register the Windows service for automatic start.
   uninstall          Stop and deregister the Windows service.
   start              Start the installed service.
   stop               Stop the installed service.
   status             Show service state and configured data root.
-  tray               Same as launching with no arguments.
   proc               Low-level process control: launch, list, info, stop.
   version            Print build information.
 
@@ -156,8 +158,8 @@ func cmdInstall(args []string) error {
 	fs := newFlagSet("install")
 	home := homeFlag(fs)
 	start := fs.Bool("start", true, "start the service after installing")
-	tray := fs.Bool("tray", true, "run the tray icon at logon for the current user")
 	aclOnly := fs.Bool("acl-only", false, "grant interactive users start/stop rights and exit")
+	_ = fs.Bool("tray", false, "ignored; the notification-area icon was removed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -182,14 +184,8 @@ func cmdInstall(args []string) error {
 	if err := winsvc.AllowInteractiveControl(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not grant start/stop to interactive users: %v\n", err)
 	}
-
-	if *tray {
-		if err := winsvc.EnableTrayAutostart(*home); err != nil {
-			// Not fatal: the core is what matters, the icon is convenience.
-			fmt.Fprintf(os.Stderr, "warning: could not register tray autostart: %v\n", err)
-		} else {
-			fmt.Println("tray icon registered to start at logon")
-		}
+	if err := winsvc.DisableTrayAutostart(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not remove leftover tray autostart: %v\n", err)
 	}
 
 	if *start {
@@ -204,7 +200,7 @@ func cmdInstall(args []string) error {
 
 func cmdUninstall(args []string) error {
 	fs := newFlagSet("uninstall")
-	keepTray := fs.Bool("keep-tray", false, "leave the tray autostart entry in place")
+	_ = fs.Bool("keep-tray", false, "ignored; leftover tray autostart is always removed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -219,10 +215,8 @@ func cmdUninstall(args []string) error {
 		fmt.Printf("service %q removed\n", winsvc.ServiceName)
 	}
 
-	if !*keepTray {
-		if err := winsvc.DisableTrayAutostart(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not remove tray autostart: %v\n", err)
-		}
+	if err := winsvc.DisableTrayAutostart(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not remove leftover tray autostart: %v\n", err)
 	}
 
 	fmt.Println("note: java processes started by JARVIS are still running and were not touched")
@@ -266,50 +260,7 @@ func cmdStatus(args []string) error {
 
 	paths := config.NewPaths(*home)
 	fmt.Printf("data root:  %s\n", paths.Root)
-
-	if cmd, err := winsvc.TrayAutostartCommand(); err == nil && cmd != "" {
-		fmt.Printf("tray:       registered at logon\n")
-	} else {
-		fmt.Printf("tray:       not registered for %s\n", os.Getenv("USERNAME"))
-	}
 	return nil
-}
-
-func cmdTray(args []string) error {
-	fs := newFlagSet("tray")
-	home := homeFlag(fs)
-	register := fs.Bool("register", false, "register the tray to start at logon and exit")
-	unregister := fs.Bool("unregister", false, "remove the logon entry and exit")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	// Autostart lives in HKCU, so these need no elevation. They are separate
-	// from `install` because the service is machine-wide while the tray icon
-	// is per-user: a second administrator logging in needs their own entry.
-	switch {
-	case *register && *unregister:
-		return errors.New("--register and --unregister are mutually exclusive")
-	case *register:
-		if err := winsvc.EnableTrayAutostart(*home); err != nil {
-			return err
-		}
-		cmd, _ := winsvc.TrayAutostartCommand()
-		fmt.Printf("tray registered at logon: %s\n", cmd)
-		return nil
-	case *unregister:
-		if err := winsvc.DisableTrayAutostart(); err != nil {
-			return err
-		}
-		fmt.Println("tray logon entry removed")
-		return nil
-	}
-
-	if err := winsvc.EnsureInstalled(*home); err != nil {
-		winsvc.NotifyError("JARVIS 설치", err.Error())
-		return err
-	}
-	return tray.Run(*home)
 }
 
 // cmdStopper is an internal helper, not something an operator invokes. It
@@ -329,18 +280,7 @@ func cmdStopper(args []string) error {
 }
 
 func printAdminURL(home string) {
-	cfg, paths, err := config.Load(home)
-	if err != nil {
-		return
-	}
-	scheme := "http"
-	if cfg.Server.TLS.Enabled {
-		scheme = "https"
-	}
-	addr := cfg.Server.Addr
-	if strings.HasPrefix(addr, "0.0.0.0:") {
-		addr = "127.0.0.1:" + strings.TrimPrefix(addr, "0.0.0.0:")
-	}
-	fmt.Printf("admin UI:   %s://%s/\n", scheme, addr)
+	fmt.Printf("admin UI:   %s\n", winsvc.AdminURL(home))
+	paths := config.NewPaths(home)
 	fmt.Printf("data root:  %s\n", paths.Root)
 }

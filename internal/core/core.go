@@ -14,6 +14,7 @@ import (
 	"github.com/sjkim/jarvis/internal/api"
 	"github.com/sjkim/jarvis/internal/artifact"
 	"github.com/sjkim/jarvis/internal/auth"
+	"github.com/sjkim/jarvis/internal/ban"
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/logging"
@@ -103,12 +104,19 @@ func Bootstrap(ctx context.Context, root string, console bool) (*Core, error) {
 	collector := metrics.NewCollector(db, paths.Root, log.With("component", "metrics"))
 	c.Metrics = collector
 
+	bans := ban.New(db, log.With("component", "ban"))
+	if err := bans.Load(ctx); err != nil {
+		c.closeAll()
+		return nil, fmt.Errorf("load ip bans: %w", err)
+	}
+
 	c.API = api.New(api.Deps{
 		Log:        log.With("component", "api"),
 		Cfg:        cfg,
 		Paths:      paths,
 		DB:         db,
 		Auth:       authService,
+		Bans:       bans,
 		Supervisor: sup,
 		Metrics:    collector,
 		Started:    c.started,

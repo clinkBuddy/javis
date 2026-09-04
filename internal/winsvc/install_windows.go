@@ -229,7 +229,7 @@ func Installed() bool {
 }
 
 // CanControl reports whether this process can start and stop the service.
-// After AllowInteractiveControl, a non-elevated tray can do that.
+// After AllowInteractiveControl, a non-elevated shortcut can do that.
 func CanControl() bool {
 	s, done, err := openFor(windows.SERVICE_START | windows.SERVICE_STOP | windows.SERVICE_QUERY_STATUS)
 	if err != nil {
@@ -241,7 +241,7 @@ func CanControl() bool {
 
 // openFor opens the service with exactly the rights the caller needs.
 // SC_MANAGER_CONNECT is enough for start/stop once the service DACL allows it,
-// so the tray does not have to run elevated after the first install.
+// so the desktop shortcut does not have to run elevated after the first install.
 func openFor(access uint32) (*mgr.Service, func(), error) {
 	h, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {

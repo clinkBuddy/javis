@@ -14,7 +14,7 @@ import (
 )
 
 // Setup returns a logger and a closer. When console is true the logger also
-// writes to stderr; the service and tray modes disable it because they have no
+// writes to stderr; the service and shortcut-launch modes disable it because they have no
 // usable console.
 func Setup(dir string, cfg config.LogConfig, console bool) (*slog.Logger, io.Closer, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {

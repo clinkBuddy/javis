@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { ApiError } from "../api";
+import { api, ApiError } from "../api";
 import { useSession } from "../session";
 
 export function Login() {
@@ -10,6 +10,19 @@ export function Login() {
   const [error, setError] = useState<string | undefined>();
   const [throttled, setThrottled] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [showHint, setShowHint] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.authSetup().then((s) => {
+      if (!cancelled) setShowHint(s.defaultHint);
+    }).catch(() => {
+      // The hint is convenience; a failed probe must not block the form.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,9 +76,12 @@ export function Login() {
           {busy ? "확인 중…" : "로그인"}
         </button>
 
-        <p className="muted small login-hint">
-          최초 계정은 <code>admin</code> / <code>admin</code> 입니다.
-        </p>
+        {showHint && (
+          <p className="muted small login-hint">
+            최초 계정은 <code>admin</code> / <code>admin</code> 입니다.
+            로그인 후 비밀번호를 반드시 변경해야 합니다.
+          </p>
+        )}
       </form>
     </div>
   );

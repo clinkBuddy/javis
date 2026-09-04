@@ -40,15 +40,18 @@ type appResponse struct {
 
 	// Live view, joined in so the dashboard needs one request rather than one
 	// per app.
-	State          string  `json:"state"`
-	PID            uint32  `json:"pid,omitempty"`
-	StartedAt      string  `json:"startedAt,omitempty"`
-	RunningVersion string  `json:"runningVersion,omitempty"`
-	ActiveVersion  string  `json:"activeVersion,omitempty"`
+	State          string `json:"state"`
+	PID            uint32 `json:"pid,omitempty"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	RunningVersion string `json:"runningVersion,omitempty"`
+	ActiveVersion  string `json:"activeVersion,omitempty"`
 	ArtifactCount  int     `json:"artifactCount"`
 	RestartCount   int     `json:"restartCount"`
 	CPUPercent     float64 `json:"cpuPercent,omitempty"`
 	RSSBytes       int64   `json:"rssBytes,omitempty"`
+	Threads        int     `json:"threads,omitempty"`
+	Handles        int     `json:"handles,omitempty"`
+	PrivateBytes   int64   `json:"privateBytes,omitempty"`
 }
 
 // appSelect joins the single instance row and the promoted artifact onto each
@@ -208,6 +211,9 @@ func (s *Server) attachLiveMetrics(apps []appResponse) {
 		if m, ok := latest[apps[i].ID]; ok {
 			apps[i].CPUPercent = m.CPUPercent
 			apps[i].RSSBytes = m.RSSBytes
+			apps[i].Threads = m.Threads
+			apps[i].Handles = m.Handles
+			apps[i].PrivateBytes = m.PrivateBytes
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sjkim/jarvis/internal/auth"
+	"github.com/sjkim/jarvis/internal/ban"
 )
 
 type loginRequest struct {
@@ -27,6 +28,7 @@ type meResponse struct {
 // registerAuthRoutes mounts the endpoints that must be reachable without a
 // session.
 func (s *Server) registerAuthRoutes(r chi.Router) {
+	r.Get("/auth/setup", s.handleAuthSetup)
 	r.Post("/auth/login", s.handleLogin)
 }
 
@@ -34,14 +36,22 @@ func (s *Server) registerSessionRoutes(r chi.Router) {
 	r.Get("/auth/me", s.handleMe)
 	r.Post("/auth/logout", s.handleLogout)
 	r.Post("/auth/password", s.handleChangePassword)
+	r.Post("/auth/username", s.handleChangeUsername)
 
 	r.Get("/users", s.requireRole(auth.RoleAdmin, s.handleListUsers))
 	r.Post("/users", s.requireRole(auth.RoleAdmin, s.handleCreateUser))
 	r.Put("/users/{id}", s.requireRole(auth.RoleAdmin, s.handleUpdateUser))
 	r.Post("/users/{id}/password", s.requireRole(auth.RoleAdmin, s.handleResetPassword))
+	r.Post("/users/{id}/username", s.requireRole(auth.RoleAdmin, s.handleAdminChangeUsername))
 	r.Delete("/users/{id}", s.requireRole(auth.RoleAdmin, s.handleDeleteUser))
 
 	r.Get("/audit", s.requireRole(auth.RoleAdmin, s.handleListAudit))
+}
+
+func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"defaultHint": s.deps.Auth != nil && s.deps.Auth.DefaultCredentialsRemain(r.Context()),
+	})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -52,13 +62,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, token, err := s.deps.Auth.Login(
-		r.Context(), req.Username, req.Password, clientIP(r), r.UserAgent())
+		r.Context(), req.Username, req.Password, peerIP(r), r.UserAgent())
 
 	// Logged here rather than by the audit middleware, which only runs behind
 	// authentication and so would record every failure as anonymous. The
 	// attempted username is the whole point of the entry: it is what
 	// distinguishes a mistyped password from someone working through a list.
 	s.auditLogin(r, req.Username, err)
+	s.maybeBanFailedLogin(r, err)
 
 	switch {
 	case errors.Is(err, auth.ErrAccountLocked):
@@ -88,9 +99,19 @@ func (s *Server) auditLogin(r *http.Request, username string, loginErr error) {
 	if _, err := s.deps.DB.ExecContext(r.Context(), `
 		INSERT INTO audit_logs (username, remote_addr, action, target, result, detail)
 		VALUES (?, ?, 'LOGIN', '/api/v1/auth/login', ?, ?)`,
-		strings.ToLower(strings.TrimSpace(username)), clientIP(r), result, detail,
+		strings.ToLower(strings.TrimSpace(username)), peerIP(r), result, detail,
 	); err != nil {
 		s.deps.Log.Warn("could not record a login attempt", "err", err)
+	}
+}
+
+func (s *Server) maybeBanFailedLogin(r *http.Request, loginErr error) {
+	if s.deps.Bans == nil || !errors.Is(loginErr, auth.ErrBadCredentials) {
+		return
+	}
+	ip := peerIP(r)
+	if n := s.deps.Bans.FailedLoginCount(r.Context(), ip); n >= ban.FailedLoginsBeforeBan {
+		_ = s.deps.Bans.Ban(r.Context(), ip, "repeated failed logins", "auto")
 	}
 }
 
@@ -154,6 +175,31 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	s.deps.Log.Info("password changed", "user", user.Username)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "password changed"})
+}
+
+func (s *Server) handleChangeUsername(w http.ResponseWriter, r *http.Request) {
+	user, _ := userOf(r)
+	var req struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	err := s.deps.Auth.ChangeUsername(r.Context(), user.ID, req.Username)
+	switch {
+	case errors.Is(err, auth.ErrUserExists):
+		writeErr(w, http.StatusConflict, err)
+		return
+	case errors.Is(err, auth.ErrUserNotFound):
+		writeErr(w, http.StatusNotFound, err)
+		return
+	case err != nil:
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	s.deps.Log.Info("username changed", "from", user.Username, "to", req.Username)
+	writeJSON(w, http.StatusOK, map[string]string{"username": strings.ToLower(strings.TrimSpace(req.Username))})
 }
 
 type createUserRequest struct {
@@ -229,6 +275,37 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "role": req.Role, "disabled": req.Disabled})
+}
+
+func (s *Server) handleAdminChangeUsername(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, errors.New("user id must be a number"))
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	err = s.deps.Auth.ChangeUsername(r.Context(), id, req.Username)
+	switch {
+	case errors.Is(err, auth.ErrUserExists):
+		writeErr(w, http.StatusConflict, err)
+		return
+	case errors.Is(err, auth.ErrUserNotFound):
+		writeErr(w, http.StatusNotFound, err)
+		return
+	case err != nil:
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       id,
+		"username": strings.ToLower(strings.TrimSpace(req.Username)),
+	})
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {

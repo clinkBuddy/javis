@@ -66,8 +66,33 @@ func TestBootstrapCreatesAdminWithKnownPassword(t *testing.T) {
 	if user.Role != RoleAdmin {
 		t.Errorf("role = %q, want admin", user.Role)
 	}
-	if user.MustChange {
-		t.Error("mustChange = true; first login should reach the UI immediately")
+	if !user.MustChange {
+		t.Error("mustChange = false; the default password must be replaced before the UI unlocks")
+	}
+	if !svc.DefaultCredentialsRemain(ctx) {
+		t.Error("DefaultCredentialsRemain = false while admin/admin is still valid")
+	}
+}
+
+func TestChangeUsernameRenamesTheAccount(t *testing.T) {
+	svc, _ := bootstrapped(t)
+	ctx := context.Background()
+
+	if err := svc.ChangeUsername(ctx, 1, "root-admin"); err != nil {
+		t.Fatalf("ChangeUsername: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, "root-admin", adminPassword, "127.0.0.1", "t"); err != nil {
+		t.Fatalf("login with the new name: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, "admin", adminPassword, "127.0.0.1", "t"); !errors.Is(err, ErrBadCredentials) {
+		t.Errorf("the old name still worked: %v", err)
+	}
+}
+
+func TestDefaultCredentialsRemainClearsAfterPasswordChange(t *testing.T) {
+	svc, _ := bootstrapped(t)
+	if svc.DefaultCredentialsRemain(context.Background()) {
+		t.Error("the hint would still advertise admin/admin after the password changed")
 	}
 }
 
