@@ -2,6 +2,7 @@
 /bin/
 /dist/
 *.exe
+*.exe~
 *.syso
 
 # go
@@ -17,7 +18,13 @@
 *.db-wal
 *.db-shm
 /p2-run.*
+/p3*.log
+/p3*.err
 /ui-*.png
+/jarvis-p3.exe
+/jarvis-p3a.exe
+cookies.txt
+vcookies.txt
 
 # Application jars are managed artifacts, not source. They are often large and
 # frequently carry bundled credentials in application*.yml, so they must never

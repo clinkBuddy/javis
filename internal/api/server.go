@@ -13,7 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/sjkim/jarvis/internal/auth"
 	"github.com/sjkim/jarvis/internal/config"
+	"github.com/sjkim/jarvis/internal/metrics"
 	"github.com/sjkim/jarvis/internal/store"
 	"github.com/sjkim/jarvis/internal/supervisor"
 	"github.com/sjkim/jarvis/internal/webui"
@@ -24,7 +26,9 @@ type Deps struct {
 	Cfg        *config.Config
 	Paths      config.Paths
 	DB         *store.DB
+	Auth       *auth.Service
 	Supervisor *supervisor.Supervisor
+	Metrics    *metrics.Collector
 	Started    time.Time
 }
 
@@ -52,14 +56,35 @@ func (s *Server) routes() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(s.requestLogger)
 	r.Use(middleware.Recoverer)
+	r.Use(securityHeaders)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/health", s.handleHealth)
-		r.Get("/version", s.handleVersion)
-		s.registerAppRoutes(r)
-		s.registerArtifactRoutes(r)
-		s.registerProfileRoutes(r)
-		s.registerJDKRoutes(r)
+		// Reachable without a session. /health is what tells an operator that
+		// JARVIS is up at all, so putting it behind the login would make a
+		// down instance indistinguishable from a locked-out one.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireOrigin)
+			r.Get("/health", s.handleHealth)
+			r.Get("/version", s.handleVersion)
+			s.registerAuthRoutes(r)
+		})
+
+		// Everything else requires a session. CSRF runs before authentication
+		// so a forged request is rejected on its own merits rather than
+		// depending on whether the session happened to be valid.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireCSRF)
+			r.Use(s.requireAuth)
+			r.Use(s.audit)
+
+			s.registerSessionRoutes(r)
+			s.registerAppRoutes(r)
+			s.registerArtifactRoutes(r)
+			s.registerProfileRoutes(r)
+			s.registerJDKRoutes(r)
+			s.registerMetricRoutes(r)
+			s.registerLogRoutes(r)
+		})
 	})
 
 	r.Handle("/*", webui.Handler())

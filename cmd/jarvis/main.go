@@ -25,6 +25,7 @@ import (
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/core"
+	"github.com/sjkim/jarvis/internal/tray"
 	"github.com/sjkim/jarvis/internal/winproc"
 	"github.com/sjkim/jarvis/internal/winsvc"
 )
@@ -43,8 +44,9 @@ func dispatch(args []string) error {
 		if isSvc, err := winsvc.IsService(); err == nil && isSvc {
 			return winsvc.Run("")
 		}
-		usage(os.Stdout)
-		return nil
+		// A double-click of jarvis.exe should land in the notification area,
+		// not print a usage page that nobody will see.
+		return cmdTray(nil)
 	}
 
 	cmd, rest := args[0], args[1:]
@@ -87,6 +89,7 @@ func usage(w *os.File) {
 Usage: jarvis <command> [flags]
 
 Commands:
+  (no args)          Install if needed, show the tray icon, start the service.
   run                Run the core in the foreground (development).
   service            Service Control Manager entry point.
   install            Register the Windows service for automatic start.
@@ -94,7 +97,7 @@ Commands:
   start              Start the installed service.
   stop               Stop the installed service.
   status             Show service state and configured data root.
-  tray               Run the notification area icon for the current user.
+  tray               Same as launching with no arguments.
   proc               Low-level process control: launch, list, info, stop.
   version            Print build information.
 
@@ -154,14 +157,31 @@ func cmdInstall(args []string) error {
 	home := homeFlag(fs)
 	start := fs.Bool("start", true, "start the service after installing")
 	tray := fs.Bool("tray", true, "run the tray icon at logon for the current user")
+	aclOnly := fs.Bool("acl-only", false, "grant interactive users start/stop rights and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	if err := winsvc.Install(*home); err != nil {
-		return err
+	if *aclOnly {
+		if err := winsvc.AllowInteractiveControl(); err != nil {
+			return err
+		}
+		fmt.Println("interactive users can start and stop the service")
+		return nil
 	}
-	fmt.Printf("service %q installed (automatic start)\n", winsvc.ServiceName)
+
+	if err := winsvc.Install(*home); err != nil {
+		if !errors.Is(err, winsvc.ErrAlreadyInstalled) {
+			return err
+		}
+		fmt.Printf("service %q is already installed\n", winsvc.ServiceName)
+	} else {
+		fmt.Printf("service %q installed (automatic start)\n", winsvc.ServiceName)
+	}
+
+	if err := winsvc.AllowInteractiveControl(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not grant start/stop to interactive users: %v\n", err)
+	}
 
 	if *tray {
 		if err := winsvc.EnableTrayAutostart(*home); err != nil {
@@ -285,8 +305,11 @@ func cmdTray(args []string) error {
 		return nil
 	}
 
-	return errors.New("the tray icon is not implemented yet (planned for P7); " +
-		"use --register or --unregister to manage the logon entry")
+	if err := winsvc.EnsureInstalled(*home); err != nil {
+		winsvc.NotifyError("JARVIS 설치", err.Error())
+		return err
+	}
+	return tray.Run(*home)
 }
 
 // cmdStopper is an internal helper, not something an operator invokes. It

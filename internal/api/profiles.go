@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/sjkim/jarvis/internal/auth"
 	"github.com/sjkim/jarvis/internal/winproc"
 )
 
@@ -43,11 +44,13 @@ type profileUpdateRequest struct {
 }
 
 func (s *Server) registerProfileRoutes(r chi.Router) {
-	r.Get("/apps/{name}/profile", s.handleGetActiveProfile)
-	r.Put("/apps/{name}/profile", s.handleUpdateProfile)
-	r.Get("/apps/{name}/profiles", s.handleListProfiles)
-	r.Post("/apps/{name}/profiles/{revision}/activate", s.handleActivateProfile)
-	r.Get("/apps/{name}/preview", s.handlePreviewCommand)
+	r.Get("/apps/{name}/profile", s.requireRole(auth.RoleViewer, s.handleGetActiveProfile))
+	r.Get("/apps/{name}/profiles", s.requireRole(auth.RoleViewer, s.handleListProfiles))
+	r.Get("/apps/{name}/preview", s.requireRole(auth.RoleViewer, s.handlePreviewCommand))
+
+	r.Put("/apps/{name}/profile", s.requireRole(auth.RoleOperator, s.handleUpdateProfile))
+	r.Post("/apps/{name}/profiles/{revision}/activate",
+		s.requireRole(auth.RoleOperator, s.handleActivateProfile))
 }
 
 func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) {

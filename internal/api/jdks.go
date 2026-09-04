@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/sjkim/jarvis/internal/auth"
 	"github.com/sjkim/jarvis/internal/jdk"
 )
 
@@ -30,12 +31,15 @@ type jdkCreateRequest struct {
 	IsDefault bool   `json:"isDefault"`
 }
 
+// registerJDKRoutes: the list is readable by anyone who can see a profile
+// form, but registering a JDK names an executable that JARVIS will then run,
+// so changes are admin-only.
 func (s *Server) registerJDKRoutes(r chi.Router) {
-	r.Get("/jdks", s.handleListJDKs)
-	r.Post("/jdks", s.handleCreateJDK)
-	r.Post("/jdks/scan", s.handleScanJDKs)
-	r.Delete("/jdks/{id}", s.handleDeleteJDK)
-	r.Post("/jdks/{id}/default", s.handleSetDefaultJDK)
+	r.Get("/jdks", s.requireRole(auth.RoleViewer, s.handleListJDKs))
+	r.Post("/jdks", s.requireRole(auth.RoleAdmin, s.handleCreateJDK))
+	r.Post("/jdks/scan", s.requireRole(auth.RoleAdmin, s.handleScanJDKs))
+	r.Delete("/jdks/{id}", s.requireRole(auth.RoleAdmin, s.handleDeleteJDK))
+	r.Post("/jdks/{id}/default", s.requireRole(auth.RoleAdmin, s.handleSetDefaultJDK))
 }
 
 func (s *Server) handleListJDKs(w http.ResponseWriter, r *http.Request) {

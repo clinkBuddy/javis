@@ -2,15 +2,21 @@ import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api";
 import { useAction, usePolled } from "../hooks";
+import { useSession } from "../session";
 import { StateBadge } from "../components/StateBadge";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { ProfileForm } from "../components/ProfileForm";
+import { MetricsPanel } from "../components/MetricsPanel";
+import { LogPanel } from "../components/LogPanel";
+import { AppSettings } from "../components/AppSettings";
+import { formatBytes } from "../api";
 
 export function AppDetail() {
   const { name = "" } = useParams();
   const status = usePolled(() => api.status(name), 3_000);
   const app = usePolled(() => api.getApp(name), 10_000);
   const action = useAction();
+  const { can } = useSession();
 
   const control = async (fn: () => Promise<unknown>) => {
     if (await action.run(fn)) {
@@ -45,37 +51,46 @@ export function AppDetail() {
                 )}
               </span>
             )}
+            {running && status.data?.cpuPercent !== undefined && (
+              <span className="muted small">
+                CPU {status.data.cpuPercent.toFixed(1)}%
+                {status.data.rssBytes ? ` · RSS ${formatBytes(status.data.rssBytes)}` : ""}
+                {status.data.restartCount ? ` · 재시작 ${status.data.restartCount}회` : ""}
+              </span>
+            )}
           </div>
         </div>
 
-        <div className="nowrap">
-          {running ? (
-            <>
+        {can("operator") && (
+          <div className="nowrap">
+            {running ? (
+              <>
+                <button
+                  className="btn"
+                  disabled={action.busy}
+                  onClick={() => control(() => api.restart(name))}
+                >
+                  재시작
+                </button>
+                <button
+                  className="btn btn-danger"
+                  disabled={action.busy}
+                  onClick={() => control(() => api.stop(name))}
+                >
+                  정지
+                </button>
+              </>
+            ) : (
               <button
-                className="btn"
+                className="btn btn-primary"
                 disabled={action.busy}
-                onClick={() => control(() => api.restart(name))}
+                onClick={() => control(() => api.start(name))}
               >
-                재시작
+                기동
               </button>
-              <button
-                className="btn btn-danger"
-                disabled={action.busy}
-                onClick={() => control(() => api.stop(name))}
-              >
-                정지
-              </button>
-            </>
-          ) : (
-            <button
-              className="btn btn-primary"
-              disabled={action.busy}
-              onClick={() => control(() => api.start(name))}
-            >
-              기동
-            </button>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
 
       {action.error && (
@@ -96,6 +111,9 @@ export function AppDetail() {
         </section>
       )}
 
+      {running && <MetricsPanel appName={name} />}
+      <LogPanel appName={name} />
+
       <ArtifactPanel
         appName={name}
         running={running}
@@ -107,6 +125,7 @@ export function AppDetail() {
       />
 
       <ProfileForm appName={name} running={running} />
+      {app.data && <AppSettings app={app.data} onSaved={() => app.refresh()} />}
     </div>
   );
 }

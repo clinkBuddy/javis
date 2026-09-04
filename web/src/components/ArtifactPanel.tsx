@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 
 import { api, formatBytes, uploadArtifact } from "../api";
 import { useAction, usePolled } from "../hooks";
+import { useSession } from "../session";
 
 interface Props {
   appName: string;
@@ -13,6 +14,7 @@ interface Props {
 export function ArtifactPanel({ appName, running, runningVersion, onChanged }: Props) {
   const artifacts = usePolled(() => api.listArtifacts(appName), 15_000);
   const action = useAction();
+  const { can } = useSession();
 
   const refreshAll = () => {
     artifacts.refresh();
@@ -33,7 +35,7 @@ export function ArtifactPanel({ appName, running, runningVersion, onChanged }: P
         <strong> 승격</strong>하면 다음 기동부터 적용됩니다.
       </p>
 
-      <UploadForm appName={appName} onUploaded={refreshAll} />
+      {can("operator") && <UploadForm appName={appName} onUploaded={refreshAll} />}
 
       {action.error && (
         <div className="alert" onClick={action.clearError}>
@@ -78,7 +80,7 @@ export function ArtifactPanel({ appName, running, runningVersion, onChanged }: P
                   <td className="mono small">{a.buildJdk || "—"}</td>
                   <td className="small nowrap">{a.uploadedAt}</td>
                   <td className="right nowrap">
-                    {!a.active && (
+                    {can("operator") && !a.active && (
                       <button
                         className="btn btn-sm"
                         disabled={action.busy}
@@ -87,20 +89,22 @@ export function ArtifactPanel({ appName, running, runningVersion, onChanged }: P
                         승격
                       </button>
                     )}
-                    <button
-                      className="btn btn-sm btn-danger"
-                      disabled={action.busy || a.active || isRunning}
-                      title={
-                        a.active
-                          ? "승격된 버전은 삭제할 수 없습니다"
-                          : isRunning
-                            ? "실행 중인 버전은 삭제할 수 없습니다"
-                            : undefined
-                      }
-                      onClick={() => act(() => api.deleteArtifact(appName, a.version))}
-                    >
-                      삭제
-                    </button>
+                    {can("admin") && (
+                      <button
+                        className="btn btn-sm btn-danger"
+                        disabled={action.busy || a.active || isRunning}
+                        title={
+                          a.active
+                            ? "승격된 버전은 삭제할 수 없습니다"
+                            : isRunning
+                              ? "실행 중인 버전은 삭제할 수 없습니다"
+                              : undefined
+                        }
+                        onClick={() => act(() => api.deleteArtifact(appName, a.version))}
+                      >
+                        삭제
+                      </button>
+                    )}
                   </td>
                 </tr>
               );

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { api, type Profile } from "../api";
 import { useAction, usePolled } from "../hooks";
+import { useSession } from "../session";
 
 const COLLECTORS = ["", "G1", "Parallel", "Serial", "Z", "Shenandoah"];
 
@@ -58,6 +59,8 @@ export function ProfileForm({ appName, running }: { appName: string; running: bo
   const jdks = usePolled(api.listJdks, 60_000);
   const preview = usePolled(() => api.preview(appName), 30_000);
   const action = useAction();
+  const { can } = useSession();
+  const readOnly = !can("operator");
 
   const [draft, setDraft] = useState<Draft>(() => toDraft(undefined));
   const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
@@ -124,7 +127,10 @@ export function ProfileForm({ appName, running }: { appName: string; running: bo
         {running && " 실행 중인 프로세스에는 재시작 후 적용됩니다."}
       </p>
 
+      {/* A fieldset disables every control inside it in one place, which is
+          both less code and less likely to miss one than a per-input flag. */}
       <form className="form" onSubmit={save}>
+        <fieldset className="form" disabled={readOnly}>
         <div className="grid-3">
           <label>
             <span>JDK</span>
@@ -242,6 +248,7 @@ export function ProfileForm({ appName, running }: { appName: string; running: bo
             {action.busy ? "저장 중…" : "저장"}
           </button>
         </div>
+        </fieldset>
       </form>
 
       <h3>명령 미리보기</h3>
@@ -288,7 +295,7 @@ export function ProfileForm({ appName, running }: { appName: string; running: bo
                   <td className="small">{rev.note || "—"}</td>
                   <td className="small nowrap">{rev.createdAt}</td>
                   <td className="right">
-                    {!rev.active && (
+                    {!rev.active && !readOnly && (
                       <button
                         className="btn btn-sm"
                         disabled={action.busy}

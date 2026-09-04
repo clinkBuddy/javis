@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sjkim/jarvis/internal/artifact"
+	"github.com/sjkim/jarvis/internal/auth"
 )
 
 type appCreateRequest struct {
@@ -21,25 +22,33 @@ type appCreateRequest struct {
 }
 
 type appResponse struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	Description string `json:"description"`
-	TargetKind  string `json:"targetKind"`
-	ShutdownURL string `json:"shutdownUrl,omitempty"`
-	Autostart   bool   `json:"autostart"`
-	Watchdog    bool   `json:"watchdog"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID             int64    `json:"id"`
+	Name           string   `json:"name"`
+	DisplayName    string   `json:"displayName"`
+	Description    string   `json:"description"`
+	TargetKind     string   `json:"targetKind"`
+	ShutdownURL    string   `json:"shutdownUrl,omitempty"`
+	Autostart      bool     `json:"autostart"`
+	Watchdog       bool     `json:"watchdog"`
+	MaxRestarts    int      `json:"maxRestarts"`
+	StartOrder     int      `json:"startOrder"`
+	StartDelaySec  int      `json:"startDelaySec"`
+	StopTimeoutSec int      `json:"stopTimeoutSec"`
+	DependsOn      []string `json:"dependsOn"`
+	CreatedAt      string   `json:"createdAt"`
+	UpdatedAt      string   `json:"updatedAt"`
 
 	// Live view, joined in so the dashboard needs one request rather than one
 	// per app.
-	State          string `json:"state"`
-	PID            uint32 `json:"pid,omitempty"`
-	StartedAt      string `json:"startedAt,omitempty"`
-	RunningVersion string `json:"runningVersion,omitempty"`
-	ActiveVersion  string `json:"activeVersion,omitempty"`
-	ArtifactCount  int    `json:"artifactCount"`
+	State          string  `json:"state"`
+	PID            uint32  `json:"pid,omitempty"`
+	StartedAt      string  `json:"startedAt,omitempty"`
+	RunningVersion string  `json:"runningVersion,omitempty"`
+	ActiveVersion  string  `json:"activeVersion,omitempty"`
+	ArtifactCount  int     `json:"artifactCount"`
+	RestartCount   int     `json:"restartCount"`
+	CPUPercent     float64 `json:"cpuPercent,omitempty"`
+	RSSBytes       int64   `json:"rssBytes,omitempty"`
 }
 
 // appSelect joins the single instance row and the promoted artifact onto each
@@ -48,10 +57,12 @@ type appResponse struct {
 const appSelect = `
 	SELECT a.id, a.name, COALESCE(a.display_name,''), COALESCE(a.description,''),
 		   a.target_kind, COALESCE(a.shutdown_url,''), a.autostart, a.watchdog,
-		   a.created_at, a.updated_at,
+		   a.max_restarts, a.start_order, a.start_delay_sec, a.stop_timeout_sec,
+		   a.depends_on, a.created_at, a.updated_at,
 		   COALESCE(i.state, 'STOPPED'), COALESCE(i.pid, 0), COALESCE(i.started_at, ''),
 		   COALESCE(run.version, ''), COALESCE(act.version, ''),
-		   (SELECT COUNT(*) FROM artifacts WHERE app_id = a.id)
+		   (SELECT COUNT(*) FROM artifacts WHERE app_id = a.id),
+		   COALESCE(i.restart_count, 0)
 	FROM apps a
 	LEFT JOIN instances i ON i.app_id = a.id
 	LEFT JOIN artifacts run ON run.id = i.artifact_id
@@ -59,23 +70,31 @@ const appSelect = `
 
 func scanApp(sc rowScanner) (appResponse, error) {
 	var a appResponse
+	var dependsRaw string
 	err := sc.Scan(&a.ID, &a.Name, &a.DisplayName, &a.Description,
 		&a.TargetKind, &a.ShutdownURL, &a.Autostart, &a.Watchdog,
-		&a.CreatedAt, &a.UpdatedAt,
+		&a.MaxRestarts, &a.StartOrder, &a.StartDelaySec, &a.StopTimeoutSec,
+		&dependsRaw, &a.CreatedAt, &a.UpdatedAt,
 		&a.State, &a.PID, &a.StartedAt,
-		&a.RunningVersion, &a.ActiveVersion, &a.ArtifactCount)
+		&a.RunningVersion, &a.ActiveVersion, &a.ArtifactCount, &a.RestartCount)
+	a.DependsOn = decodeStringSlice(dependsRaw)
 	return a, err
 }
 
+// registerAppRoutes gates each route by the least privilege that can perform
+// it: viewers read, operators run things, and only admins change what exists.
 func (s *Server) registerAppRoutes(r chi.Router) {
-	r.Get("/apps", s.handleListApps)
-	r.Post("/apps", s.handleCreateApp)
-	r.Get("/apps/{name}", s.handleGetApp)
-	r.Delete("/apps/{name}", s.handleDeleteApp)
-	r.Post("/apps/{name}/start", s.handleStartApp)
-	r.Post("/apps/{name}/stop", s.handleStopApp)
-	r.Post("/apps/{name}/restart", s.handleRestartApp)
-	r.Get("/apps/{name}/status", s.handleAppStatus)
+	r.Get("/apps", s.requireRole(auth.RoleViewer, s.handleListApps))
+	r.Get("/apps/{name}", s.requireRole(auth.RoleViewer, s.handleGetApp))
+	r.Get("/apps/{name}/status", s.requireRole(auth.RoleViewer, s.handleAppStatus))
+
+	r.Post("/apps/{name}/start", s.requireRole(auth.RoleOperator, s.handleStartApp))
+	r.Post("/apps/{name}/stop", s.requireRole(auth.RoleOperator, s.handleStopApp))
+	r.Post("/apps/{name}/restart", s.requireRole(auth.RoleOperator, s.handleRestartApp))
+
+	r.Post("/apps", s.requireRole(auth.RoleAdmin, s.handleCreateApp))
+	r.Put("/apps/{name}", s.requireRole(auth.RoleAdmin, s.handleUpdateApp))
+	r.Delete("/apps/{name}", s.requireRole(auth.RoleAdmin, s.handleDeleteApp))
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +123,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	// process killed from Task Manager leaves the row saying RUNNING, so the
 	// claim is confirmed against the OS before it reaches the dashboard.
 	s.refreshStates(r, apps)
+	s.attachLiveMetrics(apps)
 	writeJSON(w, http.StatusOK, apps)
 }
 
@@ -175,7 +195,87 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	}
 	one := []appResponse{a}
 	s.refreshStates(r, one)
+	s.attachLiveMetrics(one)
 	writeJSON(w, http.StatusOK, one[0])
+}
+
+func (s *Server) attachLiveMetrics(apps []appResponse) {
+	if s.deps.Metrics == nil {
+		return
+	}
+	latest := s.deps.Metrics.LatestAll()
+	for i := range apps {
+		if m, ok := latest[apps[i].ID]; ok {
+			apps[i].CPUPercent = m.CPUPercent
+			apps[i].RSSBytes = m.RSSBytes
+		}
+	}
+}
+
+type appUpdateRequest struct {
+	DisplayName    string   `json:"displayName"`
+	Description    string   `json:"description"`
+	ShutdownURL    string   `json:"shutdownUrl"`
+	Autostart      bool     `json:"autostart"`
+	Watchdog       bool     `json:"watchdog"`
+	MaxRestarts    int      `json:"maxRestarts"`
+	StartOrder     int      `json:"startOrder"`
+	StartDelaySec  int      `json:"startDelaySec"`
+	StopTimeoutSec int      `json:"stopTimeoutSec"`
+	DependsOn      []string `json:"dependsOn"`
+}
+
+func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	appID, err := s.appIDByName(r, name)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+
+	var req appUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.MaxRestarts < 0 || req.MaxRestarts > 100 {
+		writeErr(w, http.StatusBadRequest, errors.New("maxRestarts must be between 0 and 100"))
+		return
+	}
+	if req.StartDelaySec < 0 || req.StartDelaySec > 3600 {
+		writeErr(w, http.StatusBadRequest, errors.New("startDelaySec must be between 0 and 3600"))
+		return
+	}
+	if req.StopTimeoutSec < 1 || req.StopTimeoutSec > 600 {
+		writeErr(w, http.StatusBadRequest, errors.New("stopTimeoutSec must be between 1 and 600"))
+		return
+	}
+	for _, dep := range req.DependsOn {
+		if err := artifact.ValidateName("dependency", dep); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if dep == name {
+			writeErr(w, http.StatusBadRequest, errors.New("an app cannot depend on itself"))
+			return
+		}
+	}
+
+	dependsJSON, _ := json.Marshal(orEmptySlice(req.DependsOn))
+	_, err = s.deps.DB.ExecContext(r.Context(), `
+		UPDATE apps SET display_name = ?, description = ?, shutdown_url = ?,
+			autostart = ?, watchdog = ?, max_restarts = ?, start_order = ?,
+			start_delay_sec = ?, stop_timeout_sec = ?, depends_on = ?,
+			updated_at = datetime('now')
+		WHERE id = ?`,
+		nullStr(req.DisplayName), nullStr(req.Description), nullStr(req.ShutdownURL),
+		req.Autostart, req.Watchdog, req.MaxRestarts, req.StartOrder,
+		req.StartDelaySec, req.StopTimeoutSec, string(dependsJSON), appID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"app": name, "updated": true})
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +384,12 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request) {
 		WHERE i.app_id = (SELECT id FROM apps WHERE name = ?)`, name).
 		Scan(&version, &revision)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	var restartCount int
+	_ = s.deps.DB.QueryRowContext(r.Context(), `
+		SELECT COALESCE(restart_count, 0) FROM instances
+		WHERE app_id = (SELECT id FROM apps WHERE name = ?)`, name).Scan(&restartCount)
+
+	body := map[string]any{
 		"app":             name,
 		"state":           h.State,
 		"pid":             h.PID,
@@ -293,7 +398,19 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request) {
 		"commandLine":     h.CommandLine,
 		"runningVersion":  version.String,
 		"runningRevision": revision.String,
-	})
+		"restartCount":    restartCount,
+	}
+	if s.deps.Metrics != nil {
+		if id, err := s.appIDByName(r, name); err == nil {
+			if m, ok := s.deps.Metrics.LatestProcess(id); ok {
+				body["cpuPercent"] = m.CPUPercent
+				body["rssBytes"] = m.RSSBytes
+				body["threads"] = m.Threads
+				body["handles"] = m.Handles
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func nullStr(s string) sql.NullString {

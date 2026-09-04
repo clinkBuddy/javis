@@ -473,6 +473,84 @@ input[type="checkbox"] {
   font-size: 13px;
 }
 
+/* ---------- login ---------- */
+
+.login-screen {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 28px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.login-brand .brand-name {
+  font-size: 18px;
+}
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.login-card label > span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.login-hint {
+  margin: 4px 0 0;
+  text-align: center;
+  line-height: 1.6;
+}
+.login-screen .card {
+  width: 100%;
+  max-width: 460px;
+}
+
+.btn-block {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+}
+.meta-link {
+  color: var(--text);
+}
+
+/* A disabled fieldset is how the read-only view is produced, so it must not
+   look like a form that is merely busy. */
+fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+fieldset:disabled {
+  opacity: 0.6;
+}
+fieldset:disabled .form-actions {
+  display: none;
+}
+
 .code {
   margin: 8px 0 4px;
   padding: 12px 14px;
@@ -484,4 +562,61 @@ input[type="checkbox"] {
   white-space: pre-wrap;
   word-break: break-all;
   overflow-x: auto;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 12px;
+}
+@media (max-width: 760px) {
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.metric-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.metric-value {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 4px 0 8px;
+  font-family: var(--mono);
+}
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 56px;
+}
+.sparkline-empty {
+  min-height: 56px;
+  display: grid;
+  place-items: center;
+}
+
+.log-view {
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  height: 360px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #0b0d11;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
 }

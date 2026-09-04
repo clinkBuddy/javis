@@ -1,15 +1,18 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../api";
+import { api, formatBytes } from "../api";
 import { useAction, usePolled } from "../hooks";
+import { useSession } from "../session";
 import { StateBadge } from "../components/StateBadge";
+import { HostMetrics } from "../components/MetricsPanel";
 
 export function Dashboard() {
   // Three seconds is short enough that a start or stop looks immediate and
   // long enough that the process scan it triggers on the server stays cheap.
   const apps = usePolled(api.listApps, 3_000);
   const action = useAction();
+  const { can } = useSession();
   const [creating, setCreating] = useState(false);
 
   const control = async (fn: () => Promise<unknown>) => {
@@ -22,9 +25,11 @@ export function Dashboard() {
     <div className="page">
       <div className="page-head">
         <h1>애플리케이션</h1>
-        <button className="btn btn-primary" onClick={() => setCreating(true)}>
-          앱 추가
-        </button>
+        {can("admin") && (
+          <button className="btn btn-primary" onClick={() => setCreating(true)}>
+            앱 추가
+          </button>
+        )}
       </div>
 
       {action.error && (
@@ -33,6 +38,8 @@ export function Dashboard() {
         </div>
       )}
       {apps.error && <div className="alert">{apps.error}</div>}
+
+      <HostMetrics />
 
       {creating && (
         <CreateAppForm
@@ -61,6 +68,8 @@ export function Dashboard() {
             <tr>
               <th>이름</th>
               <th>상태</th>
+              <th>CPU</th>
+              <th>RSS</th>
               <th>실행 버전</th>
               <th>승격 버전</th>
               <th className="right">제어</th>
@@ -80,6 +89,12 @@ export function Dashboard() {
                   <td>
                     <StateBadge state={app.state} pid={app.pid} />
                   </td>
+                  <td className="mono small">
+                    {running && app.cpuPercent !== undefined ? `${app.cpuPercent.toFixed(1)}%` : "—"}
+                  </td>
+                  <td className="mono small">
+                    {running && app.rssBytes ? formatBytes(app.rssBytes) : "—"}
+                  </td>
                   <td className="mono">{app.runningVersion || "—"}</td>
                   <td className="mono">
                     {app.activeVersion || <span className="muted">미승격</span>}
@@ -93,7 +108,9 @@ export function Dashboard() {
                       )}
                   </td>
                   <td className="right nowrap">
-                    {running ? (
+                    {!can("operator") ? (
+                      <span className="muted small">읽기 전용</span>
+                    ) : running ? (
                       <>
                         <button
                           className="btn btn-sm"

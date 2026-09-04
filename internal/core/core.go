@@ -13,9 +13,11 @@ import (
 
 	"github.com/sjkim/jarvis/internal/api"
 	"github.com/sjkim/jarvis/internal/artifact"
+	"github.com/sjkim/jarvis/internal/auth"
 	"github.com/sjkim/jarvis/internal/buildinfo"
 	"github.com/sjkim/jarvis/internal/config"
 	"github.com/sjkim/jarvis/internal/logging"
+	"github.com/sjkim/jarvis/internal/metrics"
 	"github.com/sjkim/jarvis/internal/runner"
 	"github.com/sjkim/jarvis/internal/store"
 	"github.com/sjkim/jarvis/internal/supervisor"
@@ -31,11 +33,16 @@ type Core struct {
 	Paths      config.Paths
 	Log        *slog.Logger
 	DB         *store.DB
+	Auth       *auth.Service
 	Supervisor *supervisor.Supervisor
+	Metrics    *metrics.Collector
 	API        *api.Server
 
 	started time.Time
 	closers []io.Closer
+
+	// stopHousekeeping ends the background maintenance loop.
+	stopHousekeeping context.CancelFunc
 }
 
 // Bootstrap prepares every component but does not start serving. console
@@ -82,16 +89,28 @@ func Bootstrap(ctx context.Context, root string, console bool) (*Core, error) {
 		log.Warn("could not clean the upload staging directory", "err", err)
 	}
 
+	authService := auth.NewService(db, log.With("component", "auth"))
+	if err := authService.Bootstrap(ctx, paths.Root); err != nil {
+		c.closeAll()
+		return nil, err
+	}
+	c.Auth = authService
+
 	localRunner := runner.NewLocalRunner(log.With("component", "runner"))
 	sup := supervisor.New(db, paths, localRunner, log.With("component", "supervisor"))
 	c.Supervisor = sup
+
+	collector := metrics.NewCollector(db, paths.Root, log.With("component", "metrics"))
+	c.Metrics = collector
 
 	c.API = api.New(api.Deps{
 		Log:        log.With("component", "api"),
 		Cfg:        cfg,
 		Paths:      paths,
 		DB:         db,
+		Auth:       authService,
 		Supervisor: sup,
+		Metrics:    collector,
 		Started:    c.started,
 	})
 	return c, nil
@@ -108,7 +127,37 @@ func (c *Core) Start(ctx context.Context) error {
 	if err := c.API.Start(ctx); err != nil {
 		return err
 	}
+
+	hkCtx, cancel := context.WithCancel(context.Background())
+	c.stopHousekeeping = cancel
+	go c.housekeeping(hkCtx)
+	go c.Metrics.Run(hkCtx)
+
+	// Autostart after the listener is up so an operator can watch the UI as
+	// apps come online, and after reconcile so a surviving process is not
+	// launched a second time.
+	go c.Supervisor.Autostart(hkCtx)
 	return nil
+}
+
+// housekeepingInterval is how often expired sessions and stale throttle rows
+// are pruned. Neither table is read often enough for the rows to be cleaned up
+// as a side effect of normal use.
+const housekeepingInterval = 30 * time.Minute
+
+func (c *Core) housekeeping(ctx context.Context) {
+	ticker := time.NewTicker(housekeepingInterval)
+	defer ticker.Stop()
+
+	c.Auth.Cleanup(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.Auth.Cleanup(ctx)
+		}
+	}
 }
 
 // Run starts the core and blocks until ctx is cancelled or a component fails.
@@ -135,6 +184,9 @@ func (c *Core) Shutdown() error {
 	defer cancel()
 
 	var errs []error
+	if c.stopHousekeeping != nil {
+		c.stopHousekeeping()
+	}
 	// Cancel all watchers. Managed java processes are intentionally NOT stopped.
 	if c.Supervisor != nil {
 		c.Supervisor.Shutdown()

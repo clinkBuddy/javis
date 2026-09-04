@@ -15,8 +15,12 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// ErrNotInstalled is returned by the control helpers when the service is absent.
-var ErrNotInstalled = errors.New("the JARVIS service is not installed")
+var (
+	// ErrNotInstalled is returned by the control helpers when the service is absent.
+	ErrNotInstalled = errors.New("the JARVIS service is not installed")
+	// ErrAlreadyInstalled is returned by Install when the service exists.
+	ErrAlreadyInstalled = errors.New("the JARVIS service is already installed")
+)
 
 // Install registers the service for automatic start at boot.
 //
@@ -36,7 +40,7 @@ func Install(root string) error {
 
 	if s, err := m.OpenService(ServiceName); err == nil {
 		s.Close()
-		return fmt.Errorf("service %q already exists; run `jarvis uninstall` first", ServiceName)
+		return ErrAlreadyInstalled
 	}
 
 	args := []string{"service"}
@@ -112,27 +116,57 @@ func Uninstall() error {
 }
 
 func StartService() error {
-	return withService(func(s *mgr.Service) error {
-		if err := s.Start(); err != nil {
-			return fmt.Errorf("start service: %w", err)
-		}
-		return waitForState(func() (svc.State, error) {
-			st, err := s.Query()
-			return st.State, err
-		}, svc.Running, 30*time.Second)
-	})
+	st, err := Status()
+	if err != nil {
+		return err
+	}
+	switch st {
+	case svc.Running:
+		return nil
+	case svc.StartPending:
+		return waitForState(Status, svc.Running, 30*time.Second)
+	}
+
+	s, done, err := openFor(windows.SERVICE_START | windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	if err := s.Start(); err != nil {
+		return fmt.Errorf("start service: %w", err)
+	}
+	return waitForState(func() (svc.State, error) {
+		st, err := s.Query()
+		return st.State, err
+	}, svc.Running, 30*time.Second)
 }
 
 func StopService() error {
-	return withService(func(s *mgr.Service) error {
-		if _, err := s.Control(svc.Stop); err != nil {
-			return fmt.Errorf("stop service: %w", err)
-		}
-		return waitForState(func() (svc.State, error) {
-			st, err := s.Query()
-			return st.State, err
-		}, svc.Stopped, 30*time.Second)
-	})
+	st, err := Status()
+	if err != nil {
+		return err
+	}
+	switch st {
+	case svc.Stopped:
+		return nil
+	case svc.StopPending:
+		return waitForState(Status, svc.Stopped, 30*time.Second)
+	}
+
+	s, done, err := openFor(windows.SERVICE_STOP | windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	if _, err := s.Control(svc.Stop); err != nil {
+		return fmt.Errorf("stop service: %w", err)
+	}
+	return waitForState(func() (svc.State, error) {
+		st, err := s.Query()
+		return st.State, err
+	}, svc.Stopped, 30*time.Second)
 }
 
 // Status returns the current service state, or ErrNotInstalled.
@@ -188,20 +222,48 @@ func StateString(s svc.State) string {
 	}
 }
 
-// withService opens the service for control operations, which require
-// elevation. Read-only callers should use Status instead.
-func withService(fn func(*mgr.Service) error) error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("connect to service manager (run as administrator): %w", err)
-	}
-	defer m.Disconnect()
+// Installed reports whether the Windows service is registered.
+func Installed() bool {
+	_, err := Status()
+	return err == nil
+}
 
-	s, err := m.OpenService(ServiceName)
+// CanControl reports whether this process can start and stop the service.
+// After AllowInteractiveControl, a non-elevated tray can do that.
+func CanControl() bool {
+	s, done, err := openFor(windows.SERVICE_START | windows.SERVICE_STOP | windows.SERVICE_QUERY_STATUS)
 	if err != nil {
-		return ErrNotInstalled
+		return false
 	}
-	defer s.Close()
+	done()
+	return s != nil
+}
 
-	return fn(s)
+// openFor opens the service with exactly the rights the caller needs.
+// SC_MANAGER_CONNECT is enough for start/stop once the service DACL allows it,
+// so the tray does not have to run elevated after the first install.
+func openFor(access uint32) (*mgr.Service, func(), error) {
+	h, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to service manager: %w", err)
+	}
+
+	name, err := windows.UTF16PtrFromString(ServiceName)
+	if err != nil {
+		_ = windows.CloseServiceHandle(h)
+		return nil, nil, err
+	}
+	sh, err := windows.OpenService(h, name, access)
+	if err != nil {
+		_ = windows.CloseServiceHandle(h)
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil, nil, ErrNotInstalled
+		}
+		return nil, nil, err
+	}
+	s := &mgr.Service{Name: ServiceName, Handle: sh}
+	return s, func() {
+		s.Close()
+		_ = windows.CloseServiceHandle(h)
+	}, nil
 }

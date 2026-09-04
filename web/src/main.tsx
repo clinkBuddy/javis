@@ -3,9 +3,12 @@ import { createRoot } from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
 
 import { Shell } from "./Shell";
+import { SessionProvider } from "./session";
 import { Dashboard } from "./pages/Dashboard";
 import { AppDetail } from "./pages/AppDetail";
 import { Jdks } from "./pages/Jdks";
+import { Users } from "./pages/Users";
+import { ChangePassword } from "./pages/ChangePassword";
 import "./styles.css";
 
 // Hash routing avoids needing the Go file server to rewrite unknown paths to
@@ -18,6 +21,12 @@ const router = createHashRouter([
       { index: true, element: <Dashboard /> },
       { path: "apps/:name", element: <AppDetail /> },
       { path: "jdks", element: <Jdks /> },
+      // Not route-guarded: the server rejects these calls for anyone below
+      // admin, and the navigation link is already hidden. A client-side guard
+      // here would only duplicate that decision in a place that cannot
+      // enforce it.
+      { path: "users", element: <Users /> },
+      { path: "account", element: <ChangePassword forced={false} /> },
     ],
   },
 ]);
@@ -29,6 +38,8 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <SessionProvider>
+      <RouterProvider router={router} />
+    </SessionProvider>
   </StrictMode>,
 );

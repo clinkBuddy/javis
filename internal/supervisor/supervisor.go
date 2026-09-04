@@ -210,7 +210,7 @@ func (s *Supervisor) StartApp(ctx context.Context, appName string) (runner.Handl
 		return runner.Handle{}, fmt.Errorf("start %s: %w", appName, err)
 	}
 
-	if err := s.insertInstance(ctx, plan, h); err != nil {
+	if err := s.insertInstance(ctx, plan, h, 0); err != nil {
 		s.log.Error("failed to record instance in DB", "app", appName, "err", err)
 	}
 
@@ -539,11 +539,12 @@ func (s *Supervisor) promotedArtifact(ctx context.Context, appName string, artif
 // produced it. Without those ids a running process could not be traced back to
 // the version and settings it was started with, which is exactly what an
 // operator needs to know when deciding whether a restart is safe.
-func (s *Supervisor) insertInstance(ctx context.Context, plan launchPlan, h runner.Handle) error {
+func (s *Supervisor) insertInstance(ctx context.Context, plan launchPlan, h runner.Handle, restartCount int) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO instances (app_id, state, instance_uuid, pid, process_create_time,
-			artifact_id, profile_id, command_line, console_log, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+			artifact_id, profile_id, command_line, console_log, started_at,
+			restart_count, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, datetime('now'))
 		ON CONFLICT(app_id) DO UPDATE SET
 			state = excluded.state,
 			instance_uuid = excluded.instance_uuid,
@@ -556,11 +557,11 @@ func (s *Supervisor) insertInstance(ctx context.Context, plan launchPlan, h runn
 			started_at = excluded.started_at,
 			stopped_at = NULL,
 			exit_code = NULL,
-			restart_count = 0,
+			restart_count = excluded.restart_count,
 			last_error = NULL,
 			updated_at = datetime('now')`,
 		plan.appID, string(runner.StateRunning), h.InstanceID, h.PID, h.CreateTime,
-		plan.artifactID, plan.profileID, h.CommandLine, h.ConsoleLog)
+		plan.artifactID, plan.profileID, h.CommandLine, h.ConsoleLog, restartCount)
 	return err
 }
 
@@ -606,27 +607,69 @@ func (s *Supervisor) watch(ctx context.Context, appName string, appID int64, h r
 		s.mu.Unlock()
 	}()
 
-	// Poll-wait so context cancellation is responsive.
+	for {
+		if !s.waitUntilGone(ctx, h) {
+			return
+		}
+
+		s.log.Warn("process exited", "app", appName, "pid", h.PID)
+		s.recordEvent(context.Background(), appID, "exit", "warn",
+			fmt.Sprintf("process %d exited", h.PID))
+
+		policy, err := s.readPolicy(context.Background(), appID)
+		if err != nil || !policy.watchdog {
+			s.markState(context.Background(), appID, runner.StateStopped, "")
+			return
+		}
+
+		count := s.currentRestartCount(context.Background(), appID)
+		if policy.maxRestarts > 0 && count >= policy.maxRestarts {
+			msg := fmt.Sprintf("watchdog gave up after %d restart(s)", count)
+			s.log.Error(msg, "app", appName)
+			s.markState(context.Background(), appID, runner.StateFailed, msg)
+			s.recordEvent(context.Background(), appID, "watchdog", "error", msg)
+			return
+		}
+
+		backoff := watchdogBackoff(count)
+		s.markState(context.Background(), appID, runner.StateStarting,
+			fmt.Sprintf("watchdog restart in %s", backoff))
+		s.log.Info("watchdog waiting to relaunch",
+			"app", appName, "attempt", count+1, "backoff", backoff)
+
+		select {
+		case <-ctx.Done():
+			s.markState(context.Background(), appID, runner.StateStopped, "")
+			return
+		case <-time.After(backoff):
+		}
+
+		next, err := s.relaunch(ctx, appName, count+1)
+		if err != nil {
+			s.log.Error("watchdog relaunch failed", "app", appName, "err", err)
+			s.markState(context.Background(), appID, runner.StateFailed, err.Error())
+			s.recordEvent(context.Background(), appID, "watchdog", "error", err.Error())
+			return
+		}
+		s.recordEvent(context.Background(), appID, "watchdog", "info",
+			fmt.Sprintf("relaunched as pid %d (attempt %d)", next.PID, count+1))
+		h = next
+	}
+}
+
+// waitUntilGone returns false when the watcher was cancelled (an operator
+// stop, or JARVIS itself shutting down). Those must not be treated as crashes
+// or the watchdog would undo the stop.
+func (s *Supervisor) waitUntilGone(ctx context.Context, h runner.Handle) bool {
 	for {
 		gone, err := s.runner.WaitExit(ctx, h, 5*time.Second)
 		if err != nil {
-			if ctx.Err() != nil {
-				return // JARVIS is shutting down or we were cancelled
-			}
-			s.log.Error("watcher error", "app", appName, "err", err)
-			return
+			return ctx.Err() == nil
 		}
 		if gone {
-			break
+			return ctx.Err() == nil
 		}
 	}
-
-	s.log.Warn("process exited", "app", appName, "pid", h.PID)
-	_, _ = s.db.ExecContext(context.Background(), `
-		UPDATE instances SET state = ?, stopped_at = datetime('now'), updated_at = datetime('now')
-		WHERE app_id = ?`, string(runner.StateStopped), appID)
-
-	// TODO(P4): Watchdog auto-restart with exponential backoff goes here.
 }
 
 // Shutdown cancels all watchers. It does NOT stop managed java processes;

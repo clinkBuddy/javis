@@ -1,9 +1,11 @@
 import { api } from "../api";
 import { useAction, usePolled } from "../hooks";
+import { useSession } from "../session";
 
 export function Jdks() {
   const jdks = usePolled(api.listJdks, 30_000);
   const action = useAction();
+  const { can } = useSession();
 
   const act = async (fn: () => Promise<unknown>) => {
     if (await action.run(fn)) {
@@ -15,13 +17,15 @@ export function Jdks() {
     <div className="page">
       <div className="page-head">
         <h1>JDK</h1>
-        <button
-          className="btn btn-primary"
-          disabled={action.busy}
-          onClick={() => act(api.scanJdks)}
-        >
-          {action.busy ? "검색 중…" : "이 PC에서 검색"}
-        </button>
+        {can("admin") && (
+          <button
+            className="btn btn-primary"
+            disabled={action.busy}
+            onClick={() => act(api.scanJdks)}
+          >
+            {action.busy ? "검색 중…" : "이 PC에서 검색"}
+          </button>
+        )}
       </div>
 
       <p className="muted small">
@@ -68,7 +72,7 @@ export function Jdks() {
                   {j.javaHome}
                 </td>
                 <td className="right nowrap">
-                  {!j.isDefault && (
+                  {can("admin") && !j.isDefault && (
                     <>
                       <button
                         className="btn btn-sm"

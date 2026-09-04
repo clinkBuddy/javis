@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sjkim/jarvis/internal/artifact"
+	"github.com/sjkim/jarvis/internal/auth"
 )
 
 type artifactResponse struct {
@@ -30,10 +31,14 @@ type artifactResponse struct {
 }
 
 func (s *Server) registerArtifactRoutes(r chi.Router) {
-	r.Get("/apps/{name}/artifacts", s.handleListArtifacts)
-	r.Post("/apps/{name}/artifacts", s.handleUploadArtifact)
-	r.Post("/apps/{name}/artifacts/{version}/activate", s.handleActivateArtifact)
-	r.Delete("/apps/{name}/artifacts/{version}", s.handleDeleteArtifact)
+	r.Get("/apps/{name}/artifacts", s.requireRole(auth.RoleViewer, s.handleListArtifacts))
+	r.Post("/apps/{name}/artifacts", s.requireRole(auth.RoleOperator, s.handleUploadArtifact))
+	r.Post("/apps/{name}/artifacts/{version}/activate",
+		s.requireRole(auth.RoleOperator, s.handleActivateArtifact))
+	// Deleting an artifact destroys the only copy of a deployed build, so it
+	// sits a level above promoting one.
+	r.Delete("/apps/{name}/artifacts/{version}",
+		s.requireRole(auth.RoleAdmin, s.handleDeleteArtifact))
 }
 
 func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
